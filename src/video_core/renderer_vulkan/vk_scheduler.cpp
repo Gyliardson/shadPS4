@@ -259,7 +259,7 @@ void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmd
             cmdbuf.setDepthBoundsTestEnable(depth_bounds_test_enabled);
         }
     }
-    if (depth_test_enabled && dirty_state.depth_bounds) {
+    if (depth_bounds_test_enabled && dirty_state.depth_bounds) {
         dirty_state.depth_bounds = false;
         if (instance.IsDepthBoundsSupported()) {
             cmdbuf.setDepthBounds(depth_bounds_min, depth_bounds_max);
