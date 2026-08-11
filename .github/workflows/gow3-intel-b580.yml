@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+name: GOW3 Intel B580 Diagnostic
+
+on:
+  push:
+    branches:
+      - gow3-intel-b580
+  workflow_dispatch:
+
+concurrency:
+  group: gow3-intel-b580-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  windows-diagnostic:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Cache CMake configuration
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/build
+          key: gow3-b580-cmake-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: |
+            gow3-b580-cmake-
+
+      - name: Cache compilation
+        uses: hendrikmuhs/ccache-action@v1.2.21
+        with:
+          append-timestamp: false
+          key: gow3-b580-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+
+      - name: Configure CMake
+        run: >-
+          cmake --fresh -G Ninja
+          -B ${{ github.workspace }}/build
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON
+          -DCMAKE_C_COMPILER=clang-cl
+          -DCMAKE_CXX_COMPILER=clang-cl
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }} --parallel $env:NUMBER_OF_PROCESSORS
+
+      - name: Package diagnostic build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/artifact" | Out-Null
+          Copy-Item "${{ github.workspace }}/build/shadPS4.exe" "${{ github.workspace }}/artifact/shadPS4-gow3-b580-diagnostic.exe"
+          @"
+          GOW3 Intel B580 diagnostic build
+          Branch: ${{ github.ref_name }}
+          Commit: ${{ github.sha }}
+
+          After testing, close shadPS4 normally and send:
+          - shad_log.txt
+          - perf_trace.csv
+          - a screenshot if visual corruption occurred
+          "@ | Set-Content "${{ github.workspace }}/artifact/TEST-INSTRUCTIONS.txt"
+
+      - name: Upload diagnostic artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: shadps4-gow3-intel-b580-${{ github.sha }}
+          path: ${{ github.workspace }}/artifact/
+          retention-days: 14
