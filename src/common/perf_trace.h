@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -79,7 +80,10 @@ inline void RecordShaderModuleCreate(std::chrono::steady_clock::duration duratio
 }
 
 struct TraceState {
+    static constexpr size_t FileBufferSize = 1 << 20;
+
     std::mutex mutex;
+    std::array<char, FileBufferSize> file_buffer{};
     std::ofstream file;
     std::chrono::steady_clock::time_point last_present{};
     u64 frame{};
@@ -100,7 +104,6 @@ inline void FramePresented() {
     const u64 interval_us = state.last_present.time_since_epoch().count() == 0
                                 ? 0
                                 : ToMicroseconds(now - state.last_present);
-    state.last_present = now;
 
     const CounterSnapshot submit = queue_submit.Consume();
     const CounterSnapshot wait = gpu_wait.Consume();
@@ -112,6 +115,7 @@ inline void FramePresented() {
         const auto& log_dir = FS::GetUserPath(FS::PathType::LogDir);
         std::error_code ec;
         std::filesystem::create_directories(log_dir, ec);
+        state.file.rdbuf()->pubsetbuf(state.file_buffer.data(), state.file_buffer.size());
         state.file.open(log_dir / "perf_trace.csv", std::ios::out | std::ios::trunc);
         if (state.file.is_open()) {
             state.file
@@ -134,15 +138,11 @@ inline void FramePresented() {
                    << present.max_us * UsToMs << ',' << present.count << ','
                    << shader.total_us * UsToMs << ',' << shader.max_us * UsToMs << ','
                    << shader.count << '\n';
-
-        // Keep normal frames buffered to minimize perturbation. Flush periodically and immediately
-        // after a large hitch so a crash shortly afterwards still leaves useful data on disk.
-        if ((state.frame % 120) == 0 || interval_us >= 50'000) {
-            state.file.flush();
-        }
     }
 
     ++state.frame;
+    // Exclude the trace bookkeeping itself from the next host frame interval.
+    state.last_present = Clock::now();
 }
 
 } // namespace Common::PerfTrace
