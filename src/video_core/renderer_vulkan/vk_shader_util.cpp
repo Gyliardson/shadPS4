@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <memory>
 #include <glslang/Include/ResourceLimits.h>
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/SPIRV/GlslangToSpv.h>
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/perf_trace.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 namespace Vulkan {
@@ -260,7 +262,9 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device) {
         .pCode = code.data(),
     };
 
+    const auto perf_start = std::chrono::steady_clock::now();
     auto [module_result, module] = device.createShaderModule(shader_info);
+    Common::PerfTrace::RecordShaderModuleCreate(std::chrono::steady_clock::now() - perf_start);
     ASSERT_MSG(module_result == vk::Result::eSuccess, "Failed to compile SPIR-V shader: {}",
                vk::to_string(module_result));
     return module;
