@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/perf_trace.h"
 #include "core/emulator_settings.h"
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
@@ -103,10 +105,12 @@ void Swapchain::SetHDR(bool hdr) {
 }
 
 bool Swapchain::AcquireNextImage() {
+    const auto perf_start = std::chrono::steady_clock::now();
     vk::Device device = instance.GetDevice();
     vk::Result result =
         device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
                                    image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
+    Common::PerfTrace::RecordSwapchainAcquire(std::chrono::steady_clock::now() - perf_start);
 
     switch (result) {
     case vk::Result::eSuccess:
@@ -137,7 +141,9 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
+    const auto perf_start = std::chrono::steady_clock::now();
     auto result = instance.GetPresentQueue().presentKHR(present_info);
+    Common::PerfTrace::RecordSwapchainPresent(std::chrono::steady_clock::now() - perf_start);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else {
@@ -146,6 +152,7 @@ bool Swapchain::Present() {
     }
 
     frame_index = (frame_index + 1) % image_count;
+    Common::PerfTrace::FramePresented();
 
     return !needs_recreation;
 }
