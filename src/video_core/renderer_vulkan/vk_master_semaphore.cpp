@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <limits>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
 
 #include "common/assert.h"
+#include "common/perf_trace.h"
 
 namespace Vulkan {
 
@@ -45,13 +47,20 @@ void MasterSemaphore::Refresh() {
 }
 
 void MasterSemaphore::Wait(u64 tick) {
+    const auto perf_start = std::chrono::steady_clock::now();
+    const auto record_wait = [&] {
+        Common::PerfTrace::RecordGpuWait(std::chrono::steady_clock::now() - perf_start);
+    };
+
     // No need to wait if the GPU is ahead of the tick
     if (IsFree(tick)) {
+        record_wait();
         return;
     }
     // Update the GPU tick and try again
     Refresh();
     if (IsFree(tick)) {
+        record_wait();
         return;
     }
 
@@ -65,6 +74,7 @@ void MasterSemaphore::Wait(u64 tick) {
     while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
     }
     Refresh();
+    record_wait();
 }
 
 } // namespace Vulkan

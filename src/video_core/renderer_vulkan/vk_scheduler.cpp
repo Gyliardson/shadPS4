@@ -1,8 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/perf_trace.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -149,6 +152,7 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    const auto perf_start = std::chrono::steady_clock::now();
     std::scoped_lock lk{submit_mutex};
     const u64 signal_value = master_semaphore.NextTick();
 
@@ -198,6 +202,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     // Apply pending operations
     PopPendingOperations();
+    Common::PerfTrace::RecordQueueSubmit(std::chrono::steady_clock::now() - perf_start);
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
@@ -308,7 +313,8 @@ void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmd
             }
             if (dirty_state.stencil_back_reference) {
                 dirty_state.stencil_back_reference = false;
-                cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eBack, stencil_back_reference);
+                cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eBack,
+                                           stencil_back_reference);
             }
         }
         if (dirty_state.stencil_front_write_mask && dirty_state.stencil_back_write_mask &&
@@ -325,7 +331,8 @@ void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmd
             }
             if (dirty_state.stencil_back_write_mask) {
                 dirty_state.stencil_back_write_mask = false;
-                cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eBack, stencil_back_write_mask);
+                cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eBack,
+                                           stencil_back_write_mask);
             }
         }
         if (dirty_state.stencil_front_compare_mask && dirty_state.stencil_back_compare_mask &&
