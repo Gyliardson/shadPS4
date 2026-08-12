@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
 #include "common/assert.h"
+#include "common/perf_trace.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -384,8 +386,10 @@ GraphicsPipeline::GraphicsPipeline(
         .layout = *pipeline_layout,
     };
 
+    const auto perf_start = std::chrono::steady_clock::now();
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    Common::PerfTrace::RecordGraphicsPipelineCreate(std::chrono::steady_clock::now() - perf_start);
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
                vk::to_string(pipeline_result));
     pipeline = std::move(pipe);
@@ -406,7 +410,7 @@ void GraphicsPipeline::GetVertexInputs(
     const auto& vs_info = GetStage(Shader::LogicalStage::Vertex);
     for (const auto& attrib : fetch_shader->attributes) {
         const auto step_rate = attrib.GetStepRate();
-        const auto buffer = attrib.GetSharp(vs_info);
+        const auto buffer = attrib.GetSharp(*vs_info);
         attributes.push_back(Attribute{
             .location = attrib.semantic,
             .binding = attrib.semantic,
