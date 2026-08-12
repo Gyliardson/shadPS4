@@ -53,6 +53,8 @@ inline Counter gpu_wait;
 inline Counter swapchain_acquire;
 inline Counter swapchain_present;
 inline Counter shader_module_create;
+inline Counter graphics_pipeline_create;
+inline Counter compute_pipeline_create;
 
 inline u64 ToMicroseconds(std::chrono::steady_clock::duration duration) noexcept {
     return static_cast<u64>(
@@ -77,6 +79,14 @@ inline void RecordSwapchainPresent(std::chrono::steady_clock::duration duration)
 
 inline void RecordShaderModuleCreate(std::chrono::steady_clock::duration duration) noexcept {
     shader_module_create.Add(ToMicroseconds(duration));
+}
+
+inline void RecordGraphicsPipelineCreate(std::chrono::steady_clock::duration duration) noexcept {
+    graphics_pipeline_create.Add(ToMicroseconds(duration));
+}
+
+inline void RecordComputePipelineCreate(std::chrono::steady_clock::duration duration) noexcept {
+    compute_pipeline_create.Add(ToMicroseconds(duration));
 }
 
 struct TraceState {
@@ -110,6 +120,8 @@ inline void FramePresented() {
     const CounterSnapshot acquire = swapchain_acquire.Consume();
     const CounterSnapshot present = swapchain_present.Consume();
     const CounterSnapshot shader = shader_module_create.Consume();
+    const CounterSnapshot graphics_pipeline = graphics_pipeline_create.Consume();
+    const CounterSnapshot compute_pipeline = compute_pipeline_create.Consume();
 
     if (!state.file.is_open()) {
         const auto& log_dir = FS::GetUserPath(FS::PathType::LogDir);
@@ -123,21 +135,25 @@ inline void FramePresented() {
                    "queue_submit_count,gpu_wait_total_ms,gpu_wait_max_ms,gpu_wait_count,"
                    "swapchain_acquire_total_ms,swapchain_acquire_max_ms,swapchain_acquire_count,"
                    "swapchain_present_total_ms,swapchain_present_max_ms,swapchain_present_count,"
-                   "shader_module_total_ms,shader_module_max_ms,shader_module_count\n";
+                   "shader_module_total_ms,shader_module_max_ms,shader_module_count,"
+                   "graphics_pipeline_total_ms,graphics_pipeline_max_ms,graphics_pipeline_count,"
+                   "compute_pipeline_total_ms,compute_pipeline_max_ms,compute_pipeline_count\n";
         }
     }
 
     if (state.file.is_open()) {
         constexpr double UsToMs = 1.0 / 1000.0;
-        state.file << state.frame << ',' << interval_us * UsToMs << ','
-                   << submit.total_us * UsToMs << ',' << submit.max_us * UsToMs << ','
-                   << submit.count << ',' << wait.total_us * UsToMs << ','
-                   << wait.max_us * UsToMs << ',' << wait.count << ','
-                   << acquire.total_us * UsToMs << ',' << acquire.max_us * UsToMs << ','
+        state.file << state.frame << ',' << interval_us * UsToMs << ',' << submit.total_us * UsToMs
+                   << ',' << submit.max_us * UsToMs << ',' << submit.count << ','
+                   << wait.total_us * UsToMs << ',' << wait.max_us * UsToMs << ',' << wait.count
+                   << ',' << acquire.total_us * UsToMs << ',' << acquire.max_us * UsToMs << ','
                    << acquire.count << ',' << present.total_us * UsToMs << ','
                    << present.max_us * UsToMs << ',' << present.count << ','
                    << shader.total_us * UsToMs << ',' << shader.max_us * UsToMs << ','
-                   << shader.count << '\n';
+                   << shader.count << ',' << graphics_pipeline.total_us * UsToMs << ','
+                   << graphics_pipeline.max_us * UsToMs << ',' << graphics_pipeline.count << ','
+                   << compute_pipeline.total_us * UsToMs << ',' << compute_pipeline.max_us * UsToMs
+                   << ',' << compute_pipeline.count << '\n';
     }
 
     ++state.frame;
