@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - gow3-intel-b580
+      - gow3-intel-b580-pcache
   workflow_dispatch:
 
 concurrency:
@@ -72,6 +73,6 @@ jobs:
       - name: Upload diagnostic artifact
         uses: actions/upload-artifact@v7
         with:
-          name: shadps4-gow3-intel-b580-${{ github.sha }}
+          name: shadps4-gow3-${{ github.ref_name }}-${{ github.sha }}
           path: ${{ github.workspace }}/artifact/
           retention-days: 14
