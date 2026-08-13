@@ -4,15 +4,10 @@
 name: GOW3 Intel B580 Diagnostic
 
 on:
-  push:
-    branches:
-      - gow3-intel-b580
-      - gow3-intel-b580-pcache
-      - gow3-intel-b580-predication
   workflow_dispatch:
 
 concurrency:
-  group: gow3-intel-b580-${{ github.ref }}
+  group: gow3-intel-b580-diagnostic-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -27,19 +22,13 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Cache CMake configuration
-        uses: actions/cache@v5
-        with:
-          path: ${{ github.workspace }}/build
-          key: gow3-b580-cmake-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
-          restore-keys: |
-            gow3-b580-cmake-
-
-      - name: Cache compilation
+      - name: Restore rolling compilation cache
         uses: hendrikmuhs/ccache-action@v1.2.21
         with:
-          append-timestamp: false
-          key: gow3-b580-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          key: gow3-b580-release-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          append-timestamp: true
+          max-size: 2G
+          verbose: 1
 
       - name: Configure CMake
         run: >-
@@ -52,8 +41,8 @@ jobs:
           -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
-      - name: Build
-        run: cmake --build ${{ github.workspace }}/build --config ${{ env.BUILD_TYPE }} --parallel $env:NUMBER_OF_PROCESSORS
+      - name: Build shadPS4 target
+        run: cmake --build ${{ github.workspace }}/build --target shadps4 --config ${{ env.BUILD_TYPE }} --parallel $env:NUMBER_OF_PROCESSORS
 
       - name: Package diagnostic build
         shell: pwsh
