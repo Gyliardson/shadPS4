@@ -30,20 +30,89 @@ jobs:
       - name: Fetch Shadlix predication commit
         run: git fetch https://github.com/diegolix29/shadPS4.git 0e98f9a41c6944aafbaf97b18caf2ce90a06004c
 
-      - name: Cherry-pick generic predication implementation
+      - name: Cherry-pick and adapt generic predication implementation
         shell: bash
         run: |
           set +e
           git cherry-pick -x 0e98f9a41c6944aafbaf97b18caf2ce90a06004c
           rc=$?
+          set -e
+
           if [ $rc -ne 0 ]; then
-            echo "::error::Predication cherry-pick has conflicts against the current upstream-based diagnostic branch"
-            echo "--- conflicted files ---"
-            git diff --name-only --diff-filter=U
-            echo "--- conflict diff ---"
-            git diff --cc
-            exit $rc
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U | sort)
+            expected=(
+              "src/video_core/amdgpu/liverpool.cpp"
+              "src/video_core/renderer_vulkan/vk_rasterizer.cpp"
+            )
+            if [ "${conflicts[*]}" != "${expected[*]}" ]; then
+              echo "::error::Unexpected predication cherry-pick conflicts: ${conflicts[*]}"
+              git diff --cc
+              exit 1
+            fi
+
+            python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          marker = re.compile(r'<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>>[^\n]*\n', re.S)
+
+          def resolve(path, resolver, expected_count):
+              p = Path(path)
+              text = p.read_text()
+              count = 0
+
+              def repl(match):
+                  nonlocal count
+                  count += 1
+                  ours, theirs = match.group(1), match.group(2)
+                  result = resolver(ours, theirs)
+                  if result is None:
+                      raise RuntimeError(f"Unhandled conflict in {path}:\nOURS:\n{ours}\nTHEIRS:\n{theirs}")
+                  return result
+
+              text = marker.sub(repl, text)
+              if count != expected_count or '<<<<<<<' in text or '>>>>>>>' in text:
+                  raise RuntimeError(f"Expected {expected_count} conflicts in {path}, resolved {count}")
+              p.write_text(text)
+
+          def resolve_liverpool(ours, theirs):
+              if 'host_markers_enabled' in ours and 'host_markers_enabled' in theirs:
+                  return ours + '    auto* const predication = rasterizer ? &rasterizer->GetPredication() : nullptr;\n'
+              if 'Unimplemented IT_SET_PREDICATION' in ours and 'PM4CmdSetPredication' in theirs:
+                  return theirs
+              if 'cond_exec->command.Value()' in ours and 'ShouldSkipCondExec' in theirs:
+                  return theirs
+              return None
+
+          def resolve_rasterizer(ours, theirs):
+              if 'pipeline_cache' in ours and 'predication{instance, scheduler, buffer_cache}' in theirs:
+                  needle = 'liverpool{liverpool_}, memory{Core::Memory::Instance()},'
+                  if needle not in ours:
+                      raise RuntimeError('Rasterizer constructor shape changed unexpectedly')
+                  return ours.replace(
+                      needle,
+                      'liverpool{liverpool_}, predication{instance, scheduler, buffer_cache},\n'
+                      '      memory{Core::Memory::Instance()},',
+                  )
+              if 'DebugState.IncDispatch();' in ours and 'predication.EndDraw' in theirs:
+                  return ours + theirs
+              return None
+
+          resolve('src/video_core/amdgpu/liverpool.cpp', resolve_liverpool, 3)
+          resolve('src/video_core/renderer_vulkan/vk_rasterizer.cpp', resolve_rasterizer, 3)
+          PY
+
+            git add src/video_core/amdgpu/liverpool.cpp \
+                    src/video_core/renderer_vulkan/vk_rasterizer.cpp
+            GIT_EDITOR=true git cherry-pick --continue
           fi
+
+          if git grep -nE '<<<<<<<|=======|>>>>>>>' -- ':!externals' ':!*.md'; then
+            echo "::error::Conflict markers remain after predication port"
+            exit 1
+          fi
+
+          git show --stat --oneline --decorate HEAD
 
       - name: Push ported commit
         run: git push origin HEAD:gow3-intel-b580-predication
