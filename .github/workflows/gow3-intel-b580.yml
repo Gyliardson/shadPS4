@@ -52,28 +52,196 @@ jobs:
       - name: Package diagnostic build
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/artifact" | Out-Null
-          Copy-Item "${{ github.workspace }}/build/shadPS4.exe" "${{ github.workspace }}/artifact/shadPS4-gow3-b580-diagnostic.exe"
+          $artifact = "${{ github.workspace }}/artifact"
+          New-Item -ItemType Directory -Force -Path $artifact | Out-Null
+          Copy-Item "${{ github.workspace }}/build/shadPS4.exe" "$artifact/shadPS4-gow3-b580-diagnostic.exe"
+
           @"
           @echo off
+          cd /d "%~dp0"
           start "" "%~dp0shadPS4-gow3-b580-diagnostic.exe" -b
-          "@ | Set-Content -Encoding ASCII "${{ github.workspace }}/artifact/START-BIG-PICTURE.bat"
+          "@ | Set-Content -Encoding ASCII "$artifact/START-BIG-PICTURE.bat"
+
+          @'
+          param(
+              [Parameter(Mandatory = $true, Position = 0)]
+              [string]$EbootPath
+          )
+
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PSScriptRoot 'shadPS4-gow3-b580-diagnostic.exe'
+          $shadRoot = Join-Path $env:APPDATA 'shadPS4'
+          $customDir = Join-Path $shadRoot 'custom_configs'
+          $logDir = Join-Path $shadRoot 'log'
+          $configPath = Join-Path $shadRoot 'config.json'
+          $gameConfigPath = Join-Path $customDir 'CUSA01623.json'
+          $backupRoot = Join-Path $PSScriptRoot 'config-backup'
+          $outputRoot = Join-Path $PSScriptRoot 'test-output'
+
+          if (-not (Test-Path -LiteralPath $exe)) {
+              throw "Diagnostic executable not found: $exe"
+          }
+          if (-not (Test-Path -LiteralPath $EbootPath)) {
+              throw "eboot.bin not found: $EbootPath"
+          }
+          if (Test-Path -LiteralPath $backupRoot) {
+              throw "A config-backup directory already exists. Run RESTORE-CONFIG.ps1 first so an interrupted previous test cannot overwrite your real settings."
+          }
+          if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like 'shadPS4*' }) {
+              throw 'Close every running shadPS4 instance before starting an isolated diagnostic test.'
+          }
+
+          New-Item -ItemType Directory -Force -Path $shadRoot, $customDir, $logDir, $backupRoot, $outputRoot | Out-Null
+
+          function Backup-IfPresent([string]$Path, [string]$Name) {
+              if (Test-Path -LiteralPath $Path) {
+                  Move-Item -LiteralPath $Path -Destination (Join-Path $backupRoot $Name)
+              }
+          }
+
+          function Restore-IfPresent([string]$Name, [string]$Path) {
+              $backup = Join-Path $backupRoot $Name
+              if (Test-Path -LiteralPath $backup) {
+                  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+                  Move-Item -LiteralPath $backup -Destination $Path -Force
+              }
+          }
+
+          Backup-IfPresent $configPath 'config.json'
+          Backup-IfPresent $gameConfigPath 'CUSA01623.json'
+
+          try {
+              # Existing config.toml is deliberately left untouched. The temporary config.json
+              # exists for the entire emulator run, so legacy migration cannot consume it.
+              '{}' | Set-Content -LiteralPath $configPath -Encoding UTF8
+
+              $testConfig = [ordered]@{
+                  GPU = [ordered]@{
+                      copy_gpu_buffers = $false
+                      readbacks_mode = 0
+                      readback_linear_images_enabled = $false
+                      direct_memory_access_enabled = $false
+                      vblank_frequency = 60
+                  }
+                  Vulkan = [ordered]@{
+                      pipeline_cache_enabled = $false
+                      pipeline_cache_archived = $false
+                  }
+              }
+              $testConfig | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $gameConfigPath -Encoding UTF8
+              $testConfig | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $outputRoot 'TEST-CONFIG.json') -Encoding UTF8
+
+              foreach ($name in @('shad_log.txt', 'perf_trace.csv', 'shadps4.log')) {
+                  Remove-Item -LiteralPath (Join-Path $logDir $name) -Force -ErrorAction SilentlyContinue
+                  Remove-Item -LiteralPath (Join-Path $outputRoot $name) -Force -ErrorAction SilentlyContinue
+              }
+
+              Write-Host '=== GOW3 isolated diagnostic configuration ==='
+              Write-Host "Global config temporarily replaced: $configPath"
+              Write-Host "Per-game test config:             $gameConfigPath"
+              Write-Host 'Expected readbacks_mode:           0 (Disabled)'
+              Write-Host 'Expected pipeline_cache_enabled:   false'
+              Write-Host 'Your original configs will be restored after shadPS4 exits.'
+              Write-Host ''
+
+              & $exe -g $EbootPath --show-fps
+              $emulatorExitCode = $LASTEXITCODE
+          }
+          finally {
+              foreach ($name in @('shad_log.txt', 'perf_trace.csv', 'shadps4.log')) {
+                  $source = Join-Path $logDir $name
+                  if (Test-Path -LiteralPath $source) {
+                      Copy-Item -LiteralPath $source -Destination (Join-Path $outputRoot $name) -Force
+                  }
+              }
+
+              Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
+              Remove-Item -LiteralPath $gameConfigPath -Force -ErrorAction SilentlyContinue
+              Restore-IfPresent 'config.json' $configPath
+              Restore-IfPresent 'CUSA01623.json' $gameConfigPath
+
+              if (Test-Path -LiteralPath $backupRoot) {
+                  Remove-Item -LiteralPath $backupRoot -Recurse -Force
+              }
+              Write-Host ''
+              Write-Host 'Original shadPS4 configuration restored.'
+              Write-Host "Diagnostic outputs copied to: $outputRoot"
+          }
+
+          if ($null -ne $emulatorExitCode) {
+              exit $emulatorExitCode
+          }
+          '@ | Set-Content -Encoding UTF8 "$artifact/START-GOW3-CLEAN-CONFIG.ps1"
+
+          @'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          if "%~1"=="" (
+            echo Usage: START-GOW3-CLEAN-CONFIG.bat "C:\path\to\game\eboot.bin"
+            exit /b 2
+          )
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0START-GOW3-CLEAN-CONFIG.ps1" "%~1"
+          exit /b %ERRORLEVEL%
+          '@ | Set-Content -Encoding ASCII "$artifact/START-GOW3-CLEAN-CONFIG.bat"
+
+          @'
+          $ErrorActionPreference = 'Stop'
+          $shadRoot = Join-Path $env:APPDATA 'shadPS4'
+          $configPath = Join-Path $shadRoot 'config.json'
+          $gameConfigPath = Join-Path (Join-Path $shadRoot 'custom_configs') 'CUSA01623.json'
+          $backupRoot = Join-Path $PSScriptRoot 'config-backup'
+
+          if (-not (Test-Path -LiteralPath $backupRoot)) {
+              Write-Host 'No pending diagnostic config backup was found.'
+              exit 0
+          }
+
+          Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $gameConfigPath -Force -ErrorAction SilentlyContinue
+
+          $globalBackup = Join-Path $backupRoot 'config.json'
+          if (Test-Path -LiteralPath $globalBackup) {
+              New-Item -ItemType Directory -Force -Path $shadRoot | Out-Null
+              Move-Item -LiteralPath $globalBackup -Destination $configPath -Force
+          }
+
+          $gameBackup = Join-Path $backupRoot 'CUSA01623.json'
+          if (Test-Path -LiteralPath $gameBackup) {
+              New-Item -ItemType Directory -Force -Path (Split-Path -Parent $gameConfigPath) | Out-Null
+              Move-Item -LiteralPath $gameBackup -Destination $gameConfigPath -Force
+          }
+
+          Remove-Item -LiteralPath $backupRoot -Recurse -Force
+          Write-Host 'Original shadPS4 configuration restored.'
+          '@ | Set-Content -Encoding UTF8 "$artifact/RESTORE-CONFIG.ps1"
+
           @"
           GOW3 Intel B580 diagnostic build
           Branch: ${{ github.ref_name }}
           Commit: ${{ github.sha }}
 
-          Big Picture:
-          - Double-click START-BIG-PICTURE.bat
+          ISOLATED GOW3 TEST (recommended):
+          START-GOW3-CLEAN-CONFIG.bat "C:\path\to\game\eboot.bin"
 
-          Direct game launch example:
-          shadPS4-gow3-b580-diagnostic.exe -g "C:\path\to\game\eboot.bin" --show-fps
+          This launcher:
+          - backs up the existing %APPDATA%\shadPS4\config.json
+          - backs up %APPDATA%\shadPS4\custom_configs\CUSA01623.json
+          - runs with a known CUSA01623 test config
+          - forces Readbacks Mode = Disabled (0)
+          - forces Pipeline Cache = OFF
+          - keeps normal saves/home/fonts/sysmodules paths unchanged
+          - copies fresh logs to test-output\
+          - restores the original config files after shadPS4 exits
 
-          After testing, close shadPS4 normally and send:
-          - shad_log.txt
-          - perf_trace.csv
-          - a screenshot if visual corruption occurred
-          "@ | Set-Content "${{ github.workspace }}/artifact/TEST-INSTRUCTIONS.txt"
+          If the PowerShell window is forcibly terminated and config-backup remains,
+          run RESTORE-CONFIG.ps1 before another test.
+
+          Big Picture without config isolation:
+          START-BIG-PICTURE.bat
+
+          After testing, send the files from test-output\ plus a screenshot if corruption occurs.
+          "@ | Set-Content "$artifact/TEST-INSTRUCTIONS.txt"
 
       - name: Upload diagnostic artifact
         uses: actions/upload-artifact@v7
