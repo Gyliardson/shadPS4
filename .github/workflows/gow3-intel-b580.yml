@@ -5,6 +5,11 @@ name: GOW3 Intel B580 Diagnostic
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - gow3-intel-b580-predication
+    paths:
+      - .github/workflows/gow3-intel-b580.yml
 
 concurrency:
   group: gow3-intel-b580-diagnostic-${{ github.ref }}
