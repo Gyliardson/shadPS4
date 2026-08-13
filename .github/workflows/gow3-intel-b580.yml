@@ -8,6 +8,7 @@ on:
     branches:
       - gow3-intel-b580
       - gow3-intel-b580-pcache
+      - gow3-intel-b580-predication
   workflow_dispatch:
 
 concurrency:
@@ -60,9 +61,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/artifact" | Out-Null
           Copy-Item "${{ github.workspace }}/build/shadPS4.exe" "${{ github.workspace }}/artifact/shadPS4-gow3-b580-diagnostic.exe"
           @"
+          @echo off
+          start "" "%~dp0shadPS4-gow3-b580-diagnostic.exe" -b
+          "@ | Set-Content -Encoding ASCII "${{ github.workspace }}/artifact/START-BIG-PICTURE.bat"
+          @"
           GOW3 Intel B580 diagnostic build
           Branch: ${{ github.ref_name }}
           Commit: ${{ github.sha }}
+
+          Big Picture:
+          - Double-click START-BIG-PICTURE.bat
+
+          Direct game launch example:
+          shadPS4-gow3-b580-diagnostic.exe -g "C:\path\to\game\eboot.bin" --show-fps
 
           After testing, close shadPS4 normally and send:
           - shad_log.txt
