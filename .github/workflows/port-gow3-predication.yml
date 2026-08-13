@@ -107,7 +107,7 @@ jobs:
             GIT_EDITOR=true git cherry-pick --continue
           fi
 
-          if git grep -nE '<<<<<<<|=======|>>>>>>>' -- ':!externals' ':!*.md'; then
+          if git grep -nE '^(<<<<<<< |>>>>>>> )' -- ':!externals' ':!*.md'; then
             echo "::error::Conflict markers remain after predication port"
             exit 1
           fi
