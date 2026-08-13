@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+name: Port GOW3 Predication
+
+on:
+  push:
+    branches: [gow3-intel-b580-predication]
+    paths:
+      - ".github/workflows/port-gow3-predication.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  cherry-pick-predication:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout diagnostic branch
+        uses: actions/checkout@v6
+        with:
+          ref: gow3-intel-b580-predication
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch Shadlix predication commit
+        run: git fetch https://github.com/diegolix29/shadPS4.git 0e98f9a41c6944aafbaf97b18caf2ce90a06004c
+
+      - name: Cherry-pick generic predication implementation
+        shell: bash
+        run: |
+          set +e
+          git cherry-pick -x 0e98f9a41c6944aafbaf97b18caf2ce90a06004c
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::error::Predication cherry-pick has conflicts against the current upstream-based diagnostic branch"
+            echo "--- conflicted files ---"
+            git diff --name-only --diff-filter=U
+            echo "--- conflict diff ---"
+            git diff --cc
+            exit $rc
+          fi
+
+      - name: Push ported commit
+        run: git push origin HEAD:gow3-intel-b580-predication
