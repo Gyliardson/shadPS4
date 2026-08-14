@@ -11,6 +11,7 @@ on:
     paths:
       - .github/workflows/gow3-benchmark-readback.yml
       - .github/patches/gow3-benchmark-readback.patch
+      - .github/patches/gow3-benchmark-control.patch
       - .github/gow3-benchmark/**
 
 concurrency:
@@ -29,21 +30,31 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply benchmark-only instrumentation
+      - name: Apply and validate benchmark-only instrumentation
         shell: pwsh
         run: |
           git apply --check .github/patches/gow3-benchmark-readback.patch
           git apply .github/patches/gow3-benchmark-readback.patch
+          git apply --check .github/patches/gow3-benchmark-control.patch
+          git apply .github/patches/gow3-benchmark-control.patch
           git diff --check
 
-      - name: Restore rolling compilation cache
-        uses: hendrikmuhs/ccache-action@v1.2.21
-        with:
-          key: gow3-b580-release-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
-          append-timestamp: true
-          max-size: 2G
-          verbose: 1
+          $sourceChecks = @(
+            @{ Path = 'src/common/perf_trace.h'; Marker = 'image_readback_finish_total_ms' },
+            @{ Path = 'src/sdl_window.cpp'; Marker = 'GOW3_BENCHMARK_INSTRUMENTATION_V2' },
+            @{ Path = 'src/sdl_window.cpp'; Marker = 'SDL_GAMEPAD_BUTTON_GUIDE' }
+          )
+          foreach ($check in $sourceChecks) {
+            $text = Get-Content -LiteralPath $check.Path -Raw
+            if (-not $text.Contains($check.Marker)) {
+              throw "Benchmark source validation failed: '$($check.Marker)' missing from $($check.Path)"
+            }
+          }
+          Write-Host 'Benchmark source instrumentation validated.'
 
+      # Deliberately no compiler cache in this diagnostic workflow. A previous green run
+      # produced an executable without the applied benchmark instrumentation, so binary
+      # identity takes priority over compile time here.
       - name: Configure CMake
         run: >-
           cmake --fresh -G Ninja
@@ -52,26 +63,67 @@ jobs:
           -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON
           -DCMAKE_C_COMPILER=clang-cl
           -DCMAKE_CXX_COMPILER=clang-cl
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache
-          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build shadPS4 target
         run: cmake --build ${{ github.workspace }}/build --target shadps4 --config ${{ env.BUILD_TYPE }} --parallel $env:NUMBER_OF_PROCESSORS
 
-      - name: Package benchmark build
+      - name: Validate benchmark executable
+        shell: pwsh
+        run: |
+          $exe = "${{ github.workspace }}/build/shadPS4.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Built executable missing: $exe"
+          }
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $markers = @(
+            'GOW3_BENCHMARK_INSTRUMENTATION_V2',
+            'GOW3 BENCHMARK CAPTURE',
+            'image_readback_finish_total_ms'
+          )
+          foreach ($marker in $markers) {
+            if (-not $ascii.Contains($marker)) {
+              throw "INVALID BENCHMARK EXECUTABLE: compiled marker missing: $marker"
+            }
+          }
+          Write-Host 'Compiled benchmark markers validated in shadPS4.exe.'
+
+      - name: Package and revalidate benchmark build
         shell: pwsh
         run: |
           $artifact = "${{ github.workspace }}/artifact"
+          $sourceExe = "${{ github.workspace }}/build/shadPS4.exe"
+          $artifactExe = "$artifact/shadPS4-gow3-b580-benchmark.exe"
           New-Item -ItemType Directory -Force -Path $artifact | Out-Null
-          Copy-Item "${{ github.workspace }}/build/shadPS4.exe" "$artifact/shadPS4-gow3-b580-benchmark.exe"
+          Copy-Item $sourceExe $artifactExe
           Copy-Item "${{ github.workspace }}/.github/gow3-benchmark/*" $artifact -Force
+
+          $bytes = [System.IO.File]::ReadAllBytes($artifactExe)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          foreach ($marker in @('GOW3_BENCHMARK_INSTRUMENTATION_V2', 'GOW3 BENCHMARK CAPTURE', 'image_readback_finish_total_ms')) {
+            if (-not $ascii.Contains($marker)) {
+              throw "INVALID PACKAGED BENCHMARK EXECUTABLE: marker missing after copy: $marker"
+            }
+          }
+
+          $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifactExe).Hash.ToLowerInvariant()
+          $readbackPatchHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "${{ github.workspace }}/.github/patches/gow3-benchmark-readback.patch").Hash.ToLowerInvariant()
+          $controlPatchHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "${{ github.workspace }}/.github/patches/gow3-benchmark-control.patch").Hash.ToLowerInvariant()
 
           @"
           GOW3 Intel B580 benchmark artifact
           Branch: ${{ github.ref_name }}
           Commit: ${{ github.sha }}
-          Benchmark patch: .github/patches/gow3-benchmark-readback.patch
-          "@ | Set-Content -Encoding UTF8 "$artifact/BUILD-INFO.txt"
+          Instrumentation: GOW3_BENCHMARK_INSTRUMENTATION_V2
+          Readback patch SHA256: $readbackPatchHash
+          Control patch SHA256: $controlPatchHash
+          Executable SHA256: $exeHash
+          Binary marker validation: PASS
+          Compiler cache: DISABLED
+          "@ | Set-Content -Encoding utf8NoBOM "$artifact/BENCHMARK-BUILD-INFO.txt"
+
+          Write-Host "Packaged executable SHA256: $exeHash"
+          Write-Host 'Packaged benchmark markers validated.'
 
       - name: Upload benchmark artifact
         uses: actions/upload-artifact@v7
