@@ -19,6 +19,18 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'user')) {
     throw 'A portable user directory exists beside the benchmark artifact. Move/remove it so the benchmark uses the normal %APPDATA%\shadPS4 paths.'
 }
 
+# Fail before touching config/save state if the artifact is not the instrumented benchmark binary.
+$exeBytes = [System.IO.File]::ReadAllBytes($exe)
+$exeAscii = [System.Text.Encoding]::ASCII.GetString($exeBytes)
+foreach ($marker in @('GOW3_BENCHMARK_INSTRUMENTATION_V2', 'GOW3 BENCHMARK CAPTURE', 'image_readback_finish_total_ms')) {
+    if (-not $exeAscii.Contains($marker)) {
+        throw "INVALID BENCHMARK ARTIFACT: executable marker missing: $marker. Do not run this build."
+    }
+}
+$exeAscii = $null
+$exeBytes = $null
+Write-Host 'Benchmark executable preflight: PASS (GOW3_BENCHMARK_INSTRUMENTATION_V2)'
+
 $shadRoot = Join-Path $env:APPDATA 'shadPS4'
 $customDir = Join-Path $shadRoot 'custom_configs'
 $logDir = Join-Path $shadRoot 'log'
@@ -59,6 +71,7 @@ function Backup-IfPresent([string]$Path, [string]$Name) {
 }
 
 $saveBackupData = Join-Path $saveBackupRoot 'CUSA01623'
+$emulatorExitCode = $null
 
 try {
     Backup-IfPresent $configPath 'config.json'
@@ -100,10 +113,14 @@ try {
     Write-Host ''
     Write-Host '1. Load Game and enter the benchmark checkpoint.'
     Write-Host '2. Stand at the agreed starting position.'
-    Write-Host '3. Press F6 once: CSV capture STARTS and frame numbering resets to 0.'
+    Write-Host '3. Press the controller Guide/PS/Xbox button OR F6 once to START capture.'
+    Write-Host '   The terminal must print: === GOW3 BENCHMARK CAPTURE STARTED (...) ==='
     Write-Host '4. Perform the same 30-60 second route/action sequence.'
-    Write-Host '5. Press F6 again: CSV capture STOPS and flushes to disk.'
+    Write-Host '5. Press the same benchmark control again to STOP capture.'
+    Write-Host '   The terminal must print: === GOW3 BENCHMARK CAPTURE STOPPED (...) ==='
     Write-Host '6. Close shadPS4 normally.'
+    Write-Host ''
+    Write-Host 'NOTE: Steam/Windows may reserve the Guide button on some setups. If no STARTED line appears, click the game window and use F6.'
     Write-Host ''
 
     & $exe -g $EbootPath --show-fps
@@ -148,6 +165,34 @@ finally {
     Write-Host "Benchmark outputs: $outputRoot"
 }
 
-if ($null -ne $emulatorExitCode) {
+# Validate the actual capture only after transactional config/save restoration has completed.
+$tracePath = Join-Path $outputRoot 'perf_trace.csv'
+if (-not (Test-Path -LiteralPath $tracePath)) {
+    throw 'BENCHMARK CAPTURE INVALID: perf_trace.csv was not created. Capture never started; use Guide/PS/Xbox or focus the game window and press F6, and confirm the STARTED terminal line.'
+}
+$traceLines = @(Get-Content -LiteralPath $tracePath -TotalCount 2)
+if ($traceLines.Count -lt 2) {
+    throw 'BENCHMARK CAPTURE INVALID: perf_trace.csv contains no captured frame. Start capture, play for 30-60 seconds, then stop capture before closing.'
+}
+if (-not $traceLines[0].Contains('image_readback_finish_total_ms')) {
+    throw 'BENCHMARK CAPTURE INVALID: perf_trace.csv has the old schema. Do not use this result.'
+}
+
+$capturedLog = Join-Path $outputRoot 'shad_log.txt'
+if (Test-Path -LiteralPath $capturedLog) {
+    $logText = Get-Content -LiteralPath $capturedLog -Raw
+    if (-not $logText.Contains('GOW3 benchmark capture STARTED')) {
+        Write-Warning 'The trace schema is valid, but the STARTED log marker was not found in shad_log.txt.'
+    }
+    if (-not $logText.Contains('GOW3 benchmark capture STOPPED')) {
+        Write-Warning 'The trace schema is valid, but the STOPPED log marker was not found. Always stop capture before closing for a clean benchmark.'
+    }
+}
+
+Write-Host ''
+Write-Host 'BENCHMARK CAPTURE VALIDATION: PASS'
+Write-Host 'perf_trace.csv contains the instrumented image-readback schema and captured frames.'
+
+if ($null -ne $emulatorExitCode -and $emulatorExitCode -ne 0) {
     exit $emulatorExitCode
 }
