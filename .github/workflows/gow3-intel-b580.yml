@@ -65,7 +65,11 @@ jobs:
           @'
           param(
               [Parameter(Mandatory = $true, Position = 0)]
-              [string]$EbootPath
+              [string]$EbootPath,
+
+              [Parameter(Mandatory = $false, Position = 1)]
+              [ValidateRange(0, 2)]
+              [int]$ReadbacksMode = 0
           )
 
           $ErrorActionPreference = 'Stop'
@@ -76,7 +80,9 @@ jobs:
           $configPath = Join-Path $shadRoot 'config.json'
           $gameConfigPath = Join-Path $customDir 'CUSA01623.json'
           $backupRoot = Join-Path $PSScriptRoot 'config-backup'
-          $outputRoot = Join-Path $PSScriptRoot 'test-output'
+          $modeNames = @('Disabled', 'Relaxed', 'Precise')
+          $modeName = $modeNames[$ReadbacksMode]
+          $outputRoot = Join-Path $PSScriptRoot ("test-output\readbacks-{0}-{1}" -f $ReadbacksMode, $modeName)
 
           if (-not (Test-Path -LiteralPath $exe)) {
               throw "Diagnostic executable not found: $exe"
@@ -118,7 +124,7 @@ jobs:
               $testConfig = [ordered]@{
                   GPU = [ordered]@{
                       copy_gpu_buffers = $false
-                      readbacks_mode = 0
+                      readbacks_mode = $ReadbacksMode
                       readback_linear_images_enabled = $false
                       direct_memory_access_enabled = $false
                       vblank_frequency = 60
@@ -139,8 +145,8 @@ jobs:
               Write-Host '=== GOW3 isolated diagnostic configuration ==='
               Write-Host "Global config temporarily replaced: $configPath"
               Write-Host "Per-game test config:             $gameConfigPath"
-              Write-Host 'Expected readbacks_mode:           0 (Disabled)'
-              Write-Host 'Expected pipeline_cache_enabled:   false'
+              Write-Host ("Readbacks mode:                   {0} ({1})" -f $ReadbacksMode, $modeName)
+              Write-Host 'Pipeline cache:                   false'
               Write-Host 'Your original configs will be restored after shadPS4 exits.'
               Write-Host ''
 
@@ -171,7 +177,7 @@ jobs:
           if ($null -ne $emulatorExitCode) {
               exit $emulatorExitCode
           }
-          '@ | Set-Content -Encoding UTF8 "$artifact/START-GOW3-CLEAN-CONFIG.ps1"
+          '@ | Set-Content -Encoding UTF8 "$artifact/START-GOW3-READBACKS.ps1"
 
           @'
           @echo off
@@ -181,9 +187,45 @@ jobs:
             echo Usage: START-GOW3-CLEAN-CONFIG.bat "C:\path\to\game\eboot.bin"
             exit /b 2
           )
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0START-GOW3-CLEAN-CONFIG.ps1" "%~1"
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0START-GOW3-READBACKS.ps1" -EbootPath "%~1" -ReadbacksMode 0
           exit /b %ERRORLEVEL%
           '@ | Set-Content -Encoding ASCII "$artifact/START-GOW3-CLEAN-CONFIG.bat"
+
+          @'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          if "%~1"=="" (
+            echo Usage: START-GOW3-READBACKS-DISABLED.bat "C:\path\to\game\eboot.bin"
+            exit /b 2
+          )
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0START-GOW3-READBACKS.ps1" -EbootPath "%~1" -ReadbacksMode 0
+          exit /b %ERRORLEVEL%
+          '@ | Set-Content -Encoding ASCII "$artifact/START-GOW3-READBACKS-DISABLED.bat"
+
+          @'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          if "%~1"=="" (
+            echo Usage: START-GOW3-READBACKS-RELAXED.bat "C:\path\to\game\eboot.bin"
+            exit /b 2
+          )
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0START-GOW3-READBACKS.ps1" -EbootPath "%~1" -ReadbacksMode 1
+          exit /b %ERRORLEVEL%
+          '@ | Set-Content -Encoding ASCII "$artifact/START-GOW3-READBACKS-RELAXED.bat"
+
+          @'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          if "%~1"=="" (
+            echo Usage: START-GOW3-READBACKS-PRECISE.bat "C:\path\to\game\eboot.bin"
+            exit /b 2
+          )
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0START-GOW3-READBACKS.ps1" -EbootPath "%~1" -ReadbacksMode 2
+          exit /b %ERRORLEVEL%
+          '@ | Set-Content -Encoding ASCII "$artifact/START-GOW3-READBACKS-PRECISE.bat"
 
           @'
           $ErrorActionPreference = 'Stop'
@@ -221,18 +263,21 @@ jobs:
           Branch: ${{ github.ref_name }}
           Commit: ${{ github.sha }}
 
-          ISOLATED GOW3 TEST (recommended):
-          START-GOW3-CLEAN-CONFIG.bat "C:\path\to\game\eboot.bin"
+          ISOLATED READBACK A/B LAUNCHERS:
+          START-GOW3-READBACKS-DISABLED.bat "C:\path\to\game\eboot.bin"  = mode 0
+          START-GOW3-READBACKS-RELAXED.bat  "C:\path\to\game\eboot.bin"  = mode 1
+          START-GOW3-READBACKS-PRECISE.bat  "C:\path\to\game\eboot.bin"  = mode 2
 
-          This launcher:
-          - backs up the existing %APPDATA%\shadPS4\config.json
-          - backs up %APPDATA%\shadPS4\custom_configs\CUSA01623.json
-          - runs with a known CUSA01623 test config
-          - forces Readbacks Mode = Disabled (0)
-          - forces Pipeline Cache = OFF
-          - keeps normal saves/home/fonts/sysmodules paths unchanged
-          - copies fresh logs to test-output\
-          - restores the original config files after shadPS4 exits
+          All three launchers:
+          - back up the existing %APPDATA%\shadPS4\config.json
+          - back up %APPDATA%\shadPS4\custom_configs\CUSA01623.json
+          - force Pipeline Cache = OFF
+          - keep Copy GPU Buffers, linear image readback and DMA disabled
+          - keep normal saves/home/fonts/sysmodules paths unchanged
+          - write fresh outputs under test-output\readbacks-N-Mode\
+          - restore the original config files after shadPS4 exits
+
+          START-GOW3-CLEAN-CONFIG.bat remains an alias for Disabled (0).
 
           If the PowerShell window is forcibly terminated and config-backup remains,
           run RESTORE-CONFIG.ps1 before another test.
@@ -240,7 +285,7 @@ jobs:
           Big Picture without config isolation:
           START-BIG-PICTURE.bat
 
-          After testing, send the files from test-output\ plus a screenshot if corruption occurs.
+          Test one mode at a time and send that mode's test-output files.
           "@ | Set-Content "$artifact/TEST-INSTRUCTIONS.txt"
 
       - name: Upload diagnostic artifact
