@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+name: GOW3 Readback Benchmark Diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - gow3-intel-b580-predication
+    paths:
+      - .github/workflows/gow3-benchmark-readback.yml
+      - .github/patches/gow3-benchmark-readback.patch
+      - .github/gow3-benchmark/**
+
+concurrency:
+  group: gow3-readback-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  windows-benchmark:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Apply benchmark-only instrumentation
+        shell: pwsh
+        run: |
+          git apply --check .github/patches/gow3-benchmark-readback.patch
+          git apply .github/patches/gow3-benchmark-readback.patch
+          git diff --check
+
+      - name: Restore rolling compilation cache
+        uses: hendrikmuhs/ccache-action@v1.2.21
+        with:
+          key: gow3-b580-release-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          append-timestamp: true
+          max-size: 2G
+          verbose: 1
+
+      - name: Configure CMake
+        run: >-
+          cmake --fresh -G Ninja
+          -B ${{ github.workspace }}/build
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE=ON
+          -DCMAKE_C_COMPILER=clang-cl
+          -DCMAKE_CXX_COMPILER=clang-cl
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build shadPS4 target
+        run: cmake --build ${{ github.workspace }}/build --target shadps4 --config ${{ env.BUILD_TYPE }} --parallel $env:NUMBER_OF_PROCESSORS
+
+      - name: Package benchmark build
+        shell: pwsh
+        run: |
+          $artifact = "${{ github.workspace }}/artifact"
+          New-Item -ItemType Directory -Force -Path $artifact | Out-Null
+          Copy-Item "${{ github.workspace }}/build/shadPS4.exe" "$artifact/shadPS4-gow3-b580-benchmark.exe"
+          Copy-Item "${{ github.workspace }}/.github/gow3-benchmark/*" $artifact -Force
+
+          @"
+          GOW3 Intel B580 benchmark artifact
+          Branch: ${{ github.ref_name }}
+          Commit: ${{ github.sha }}
+          Benchmark patch: .github/patches/gow3-benchmark-readback.patch
+          "@ | Set-Content -Encoding UTF8 "$artifact/BUILD-INFO.txt"
+
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: shadps4-gow3-benchmark-${{ github.ref_name }}-${{ github.sha }}
+          path: ${{ github.workspace }}/artifact/
+          retention-days: 14

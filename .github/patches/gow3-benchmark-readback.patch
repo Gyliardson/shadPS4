@@ -1,0 +1,255 @@
+diff --git a/src/common/perf_trace.h b/src/common/perf_trace.h
+--- a/src/common/perf_trace.h
++++ b/src/common/perf_trace.h
+@@ -55,6 +55,10 @@
+ inline Counter shader_module_create;
+ inline Counter graphics_pipeline_create;
+ inline Counter compute_pipeline_create;
++inline Counter image_readback;
++inline Counter image_readback_finish;
++inline Counter image_readback_copyback;
++inline std::atomic<u64> image_readback_bytes{};
+ 
+ inline u64 ToMicroseconds(std::chrono::steady_clock::duration duration) noexcept {
+     return static_cast<u64>(
+@@ -89,6 +93,33 @@
+     compute_pipeline_create.Add(ToMicroseconds(duration));
+ }
+ 
++inline void RecordImageReadback(std::chrono::steady_clock::duration duration, u64 bytes) noexcept {
++    image_readback.Add(ToMicroseconds(duration));
++    image_readback_bytes.fetch_add(bytes, std::memory_order_relaxed);
++}
++
++inline void RecordImageReadbackFinish(std::chrono::steady_clock::duration duration) noexcept {
++    image_readback_finish.Add(ToMicroseconds(duration));
++}
++
++inline void RecordImageReadbackCopyback(std::chrono::steady_clock::duration duration) noexcept {
++    image_readback_copyback.Add(ToMicroseconds(duration));
++}
++
++inline void ResetCounters() noexcept {
++    queue_submit.Consume();
++    gpu_wait.Consume();
++    swapchain_acquire.Consume();
++    swapchain_present.Consume();
++    shader_module_create.Consume();
++    graphics_pipeline_create.Consume();
++    compute_pipeline_create.Consume();
++    image_readback.Consume();
++    image_readback_finish.Consume();
++    image_readback_copyback.Consume();
++    image_readback_bytes.exchange(0, std::memory_order_relaxed);
++}
++
+ struct TraceState {
+     static constexpr size_t FileBufferSize = 1 << 20;
+ 
+@@ -97,6 +128,7 @@
+     std::ofstream file;
+     std::chrono::steady_clock::time_point last_present{};
+     u64 frame{};
++    bool capture_active{};
+ };
+ 
+ inline TraceState& GetState() {
+@@ -104,6 +136,53 @@
+     return state;
+ }
+ 
++inline bool ToggleCapture() {
++    auto& state = GetState();
++    std::scoped_lock lock{state.mutex};
++
++    if (state.capture_active) {
++        state.capture_active = false;
++        if (state.file.is_open()) {
++            state.file.flush();
++            state.file.close();
++        }
++        return false;
++    }
++
++    ResetCounters();
++    state.frame = 0;
++    state.last_present = {};
++
++    const auto& log_dir = FS::GetUserPath(FS::PathType::LogDir);
++    std::error_code ec;
++    std::filesystem::create_directories(log_dir, ec);
++    if (state.file.is_open()) {
++        state.file.close();
++    }
++    state.file.clear();
++    state.file.rdbuf()->pubsetbuf(state.file_buffer.data(), state.file_buffer.size());
++    state.file.open(log_dir / "perf_trace.csv", std::ios::out | std::ios::trunc);
++    if (!state.file.is_open()) {
++        return false;
++    }
++
++    state.file
++        << "frame,host_interval_ms,queue_submit_total_ms,queue_submit_max_ms,"
++           "queue_submit_count,gpu_wait_total_ms,gpu_wait_max_ms,gpu_wait_count,"
++           "swapchain_acquire_total_ms,swapchain_acquire_max_ms,swapchain_acquire_count,"
++           "swapchain_present_total_ms,swapchain_present_max_ms,swapchain_present_count,"
++           "shader_module_total_ms,shader_module_max_ms,shader_module_count,"
++           "graphics_pipeline_total_ms,graphics_pipeline_max_ms,graphics_pipeline_count,"
++           "compute_pipeline_total_ms,compute_pipeline_max_ms,compute_pipeline_count,"
++           "image_readback_total_ms,image_readback_max_ms,image_readback_count,"
++           "image_readback_finish_total_ms,image_readback_finish_max_ms,"
++           "image_readback_finish_count,image_readback_copyback_total_ms,"
++           "image_readback_copyback_max_ms,image_readback_copyback_count,"
++           "image_readback_bytes\n";
++    state.capture_active = true;
++    return true;
++}
++
+ inline void FramePresented() {
+     using Clock = std::chrono::steady_clock;
+ 
+@@ -111,6 +190,10 @@
+     auto& state = GetState();
+     std::scoped_lock lock{state.mutex};
+ 
++    if (!state.capture_active) {
++        return;
++    }
++
+     const u64 interval_us = state.last_present.time_since_epoch().count() == 0
+                                 ? 0
+                                 : ToMicroseconds(now - state.last_present);
+@@ -122,39 +205,28 @@
+     const CounterSnapshot shader = shader_module_create.Consume();
+     const CounterSnapshot graphics_pipeline = graphics_pipeline_create.Consume();
+     const CounterSnapshot compute_pipeline = compute_pipeline_create.Consume();
+-
+-    if (!state.file.is_open()) {
+-        const auto& log_dir = FS::GetUserPath(FS::PathType::LogDir);
+-        std::error_code ec;
+-        std::filesystem::create_directories(log_dir, ec);
+-        state.file.rdbuf()->pubsetbuf(state.file_buffer.data(), state.file_buffer.size());
+-        state.file.open(log_dir / "perf_trace.csv", std::ios::out | std::ios::trunc);
+-        if (state.file.is_open()) {
+-            state.file
+-                << "frame,host_interval_ms,queue_submit_total_ms,queue_submit_max_ms,"
+-                   "queue_submit_count,gpu_wait_total_ms,gpu_wait_max_ms,gpu_wait_count,"
+-                   "swapchain_acquire_total_ms,swapchain_acquire_max_ms,swapchain_acquire_count,"
+-                   "swapchain_present_total_ms,swapchain_present_max_ms,swapchain_present_count,"
+-                   "shader_module_total_ms,shader_module_max_ms,shader_module_count,"
+-                   "graphics_pipeline_total_ms,graphics_pipeline_max_ms,graphics_pipeline_count,"
+-                   "compute_pipeline_total_ms,compute_pipeline_max_ms,compute_pipeline_count\n";
+-        }
+-    }
+-
+-    if (state.file.is_open()) {
+-        constexpr double UsToMs = 1.0 / 1000.0;
+-        state.file << state.frame << ',' << interval_us * UsToMs << ',' << submit.total_us * UsToMs
+-                   << ',' << submit.max_us * UsToMs << ',' << submit.count << ','
+-                   << wait.total_us * UsToMs << ',' << wait.max_us * UsToMs << ',' << wait.count
+-                   << ',' << acquire.total_us * UsToMs << ',' << acquire.max_us * UsToMs << ','
+-                   << acquire.count << ',' << present.total_us * UsToMs << ','
+-                   << present.max_us * UsToMs << ',' << present.count << ','
+-                   << shader.total_us * UsToMs << ',' << shader.max_us * UsToMs << ','
+-                   << shader.count << ',' << graphics_pipeline.total_us * UsToMs << ','
+-                   << graphics_pipeline.max_us * UsToMs << ',' << graphics_pipeline.count << ','
+-                   << compute_pipeline.total_us * UsToMs << ',' << compute_pipeline.max_us * UsToMs
+-                   << ',' << compute_pipeline.count << '\n';
+-    }
++    const CounterSnapshot readback = image_readback.Consume();
++    const CounterSnapshot readback_finish = image_readback_finish.Consume();
++    const CounterSnapshot readback_copyback = image_readback_copyback.Consume();
++    const u64 readback_bytes = image_readback_bytes.exchange(0, std::memory_order_relaxed);
++
++    constexpr double UsToMs = 1.0 / 1000.0;
++    state.file << state.frame << ',' << interval_us * UsToMs << ',' << submit.total_us * UsToMs
++               << ',' << submit.max_us * UsToMs << ',' << submit.count << ','
++               << wait.total_us * UsToMs << ',' << wait.max_us * UsToMs << ',' << wait.count << ','
++               << acquire.total_us * UsToMs << ',' << acquire.max_us * UsToMs << ','
++               << acquire.count << ',' << present.total_us * UsToMs << ','
++               << present.max_us * UsToMs << ',' << present.count << ','
++               << shader.total_us * UsToMs << ',' << shader.max_us * UsToMs << ',' << shader.count
++               << ',' << graphics_pipeline.total_us * UsToMs << ','
++               << graphics_pipeline.max_us * UsToMs << ',' << graphics_pipeline.count << ','
++               << compute_pipeline.total_us * UsToMs << ',' << compute_pipeline.max_us * UsToMs
++               << ',' << compute_pipeline.count << ',' << readback.total_us * UsToMs << ','
++               << readback.max_us * UsToMs << ',' << readback.count << ','
++               << readback_finish.total_us * UsToMs << ',' << readback_finish.max_us * UsToMs << ','
++               << readback_finish.count << ',' << readback_copyback.total_us * UsToMs << ','
++               << readback_copyback.max_us * UsToMs << ',' << readback_copyback.count << ','
++               << readback_bytes << '\n';
+ 
+     ++state.frame;
+     // Exclude the trace bookkeeping itself from the next host frame interval.
+diff --git a/src/video_core/texture_cache/texture_cache.cpp b/src/video_core/texture_cache/texture_cache.cpp
+--- a/src/video_core/texture_cache/texture_cache.cpp
++++ b/src/video_core/texture_cache/texture_cache.cpp
+@@ -1,9 +1,11 @@
+ // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <chrono>
+ #include <xxhash.h>
+ 
+ #include "common/assert.h"
+ #include "common/debug.h"
+ #include "common/div_ceil.h"
++#include "common/perf_trace.h"
+ #include "common/scope_exit.h"
+ #include "core/emulator_settings.h"
+ #include "core/memory.h"
+@@ -58,6 +60,7 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+     if (False(image.flags & ImageFlagBits::GpuModified)) {
+         return;
+     }
++    const auto readback_start = std::chrono::steady_clock::now();
+     auto& download_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
+     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
+                               image.info.resources.layers * (image.info.num_bits / 8);
+@@ -84,9 +87,17 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
+                              download_buffer.Handle(), image_download);
+ 
+     if (sync) {
++        const auto finish_start = std::chrono::steady_clock::now();
+         scheduler.Finish();
++        Common::PerfTrace::RecordImageReadbackFinish(std::chrono::steady_clock::now() -
++                                                     finish_start);
++        const auto copyback_start = std::chrono::steady_clock::now();
+         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
+                                                   download, download_size);
++        Common::PerfTrace::RecordImageReadbackCopyback(std::chrono::steady_clock::now() -
++                                                       copyback_start);
++        Common::PerfTrace::RecordImageReadback(std::chrono::steady_clock::now() - readback_start,
++                                               download_size);
+     } else {
+         scheduler.DeferPriorityOperation(
+             [this, device_addr = image.info.guest_address, download, download_size] {
+diff --git a/src/sdl_window.cpp b/src/sdl_window.cpp
+--- a/src/sdl_window.cpp
++++ b/src/sdl_window.cpp
+@@ -15,6 +16,7 @@
+ #include "common/elf_info.h"
+ #include "common/io_file.h"
+ #include "common/logging/formatter.h"
++#include "common/perf_trace.h"
+ #include "common/scope_exit.h"
+ #include "core/debug_state.h"
+ #include "core/devtools/layer.h"
+@@ -190,6 +191,17 @@ void WindowSDL::WaitEvent() {
+         return;
+     }
+ 
++    if ((event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) &&
++        event.key.key == SDLK_F6) {
++        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
++            const bool active = Common::PerfTrace::ToggleCapture();
++            LOG_INFO(Frontend, "GOW3 benchmark trace {} (F6)",
++                     active ? "STARTED" : "STOPPED");
++        }
++        // Keep the diagnostic hotkey out of guest input state.
++        return;
++    }
++
+     if (Libraries::Mouse::PushSDLEvent(event)) {
+         return;
+     }
