@@ -5,18 +5,27 @@ FIRST-TIME SETUP
 2. Close shadPS4.
 3. Run CREATE-GOW3-BENCHMARK-SNAPSHOT.bat.
 4. The snapshot is stored persistently under %APPDATA%\shadPS4\gow3-benchmark\snapshot and is reused by future artifacts.
+5. Do not recreate the snapshot between A/B builds unless intentionally changing the benchmark checkpoint.
 
 EACH BENCHMARK RUN
 1. Run START-GOW3-BENCHMARK.bat "C:\path\to\GodOfWar3\eboot.bin".
-2. Load Game and enter the same checkpoint.
-3. Stand at the same starting position.
-4. Press F6 once. The terminal logs "GOW3 benchmark trace STARTED" and perf_trace.csv begins at frame 0.
-5. Repeat the same 30-60 second route/actions.
-6. Press F6 again. The terminal logs "STOPPED" and the CSV is flushed/closed.
-7. Close shadPS4 normally.
+2. The launcher performs a binary preflight before touching configs or saves. It must print:
+   Benchmark executable preflight: PASS (GOW3_BENCHMARK_INSTRUMENTATION_V2)
+3. Load Game and enter the same checkpoint.
+4. Stand at the same starting position.
+5. Press the controller Guide/PS/Xbox button OR F6 once. The terminal must print a large STARTED line and perf_trace.csv begins at frame 0.
+6. Repeat the same 30-60 second route/actions.
+7. Press the same benchmark control again. The terminal must print STOPPED and the CSV is flushed/closed.
+8. Close shadPS4 normally.
+9. The launcher must finish with BENCHMARK CAPTURE VALIDATION: PASS.
+
+Controller note:
+- The benchmark intercepts SDL_GAMEPAD_BUTTON_GUIDE in this diagnostic build, so a mapped Guide/PS/Xbox button can start/stop capture without switching to keyboard gameplay.
+- Steam, Windows Game Bar, controller middleware, or a driver may reserve/intercept the Guide button before SDL receives it. If no STARTED line appears, click/focus the shadPS4 game window and use F6 as the fallback.
+- F6 and Guide are swallowed by this diagnostic handler and are not forwarded as guest input when recognized.
 
 The launcher temporarily replaces the live CUSA01623 save with a fresh copy of the immutable benchmark snapshot.
-When shadPS4 exits, it restores the user's original live save and original global/per-game configs.
+When shadPS4 exits, it restores the user's original live save and original global/per-game configs before capture postflight validation.
 
 If PowerShell or Windows is forcibly terminated, pending transactional state remains under %APPDATA%\shadPS4\gow3-benchmark\pending-state. Close shadPS4 and run:
 RESTORE-GOW3-BENCHMARK-STATE.ps1
@@ -30,11 +39,17 @@ CONTROLLED GPU CONFIG
 - Pipeline Cache Archived: OFF
 - VBlank: 60
 
-NEW CSV COLUMNS
+REQUIRED CSV COLUMNS
 - image_readback_total_ms / max_ms / count
 - image_readback_finish_total_ms / max_ms / count
 - image_readback_copyback_total_ms / max_ms / count
 - image_readback_bytes
+
+BUILD/CAPTURE SAFETY
+- CI refuses to upload the artifact unless the compiled EXE contains GOW3_BENCHMARK_INSTRUMENTATION_V2, GOW3 BENCHMARK CAPTURE, and image_readback_finish_total_ms.
+- The launcher repeats the same binary-marker validation locally before touching the user's save/configuration.
+- After the emulator exits, the launcher rejects a missing/empty trace or the legacy 23-column CSV schema.
+- BENCHMARK-BUILD-INFO.txt records executable and patch SHA-256 hashes.
 
 Output directory:
 test-output\benchmark-readback\

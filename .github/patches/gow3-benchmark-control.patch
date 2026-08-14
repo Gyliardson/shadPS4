@@ -1,0 +1,57 @@
+diff --git a/src/sdl_window.cpp b/src/sdl_window.cpp
+--- a/src/sdl_window.cpp
++++ b/src/sdl_window.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdio>
+ #include <SDL3/SDL_events.h>
+ #include <SDL3/SDL_hints.h>
+ #include <SDL3/SDL_init.h>
+@@ -191,16 +192,44 @@ void WindowSDL::WaitEvent() {
+         return;
+     }
+ 
++    static const bool benchmark_ready_printed = [] {
++        std::fprintf(stderr, "\n=== GOW3_BENCHMARK_INSTRUMENTATION_V2 READY ===\n");
++        std::fprintf(stderr, "Capture: F6 keyboard or Guide/PS/Xbox controller button.\n\n");
++        std::fflush(stderr);
++        LOG_INFO(Frontend, "GOW3_BENCHMARK_INSTRUMENTATION_V2 ready");
++        return true;
++    }();
++    (void)benchmark_ready_printed;
++
++    const auto toggle_benchmark_capture = [](const char* trigger) {
++        const bool active = Common::PerfTrace::ToggleCapture();
++        std::fprintf(stderr, "\n=== GOW3 BENCHMARK CAPTURE %s (%s) ===\n\n",
++                     active ? "STARTED" : "STOPPED", trigger);
++        std::fflush(stderr);
++        LOG_INFO(Frontend, "GOW3 benchmark capture {} ({})", active ? "STARTED" : "STOPPED",
++                 trigger);
++    };
++
+     if ((event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) &&
+         event.key.key == SDLK_F6) {
+         if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+-            const bool active = Common::PerfTrace::ToggleCapture();
+-            LOG_INFO(Frontend, "GOW3 benchmark trace {} (F6)",
+-                     active ? "STARTED" : "STOPPED");
++            toggle_benchmark_capture("F6");
+         }
+         // Keep the diagnostic hotkey out of guest input state.
+         return;
+     }
+ 
++    if ((event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
++         event.type == SDL_EVENT_GAMEPAD_BUTTON_UP) &&
++        event.gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) {
++        if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
++            toggle_benchmark_capture("Controller Guide");
++        }
++        // Keep the diagnostic Guide/PS/Xbox button out of guest input state.
++        return;
++    }
++
+     if (Libraries::Mouse::PushSDLEvent(event)) {
+         return;
+     }
