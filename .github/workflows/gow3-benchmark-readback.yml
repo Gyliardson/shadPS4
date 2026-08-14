@@ -33,10 +33,13 @@ jobs:
       - name: Apply and validate benchmark-only instrumentation
         shell: pwsh
         run: |
-          git apply --check .github/patches/gow3-benchmark-readback.patch
-          git apply .github/patches/gow3-benchmark-readback.patch
-          git apply --check .github/patches/gow3-benchmark-control.patch
-          git apply .github/patches/gow3-benchmark-control.patch
+          # These diagnostic patches were assembled from isolated hunks. --recount makes
+          # git derive the hunk lengths from the patch body instead of trusting stale
+          # line-count metadata, while --check still rejects context/content mismatches.
+          git apply --recount --check .github/patches/gow3-benchmark-readback.patch
+          git apply --recount .github/patches/gow3-benchmark-readback.patch
+          git apply --recount --check .github/patches/gow3-benchmark-control.patch
+          git apply --recount .github/patches/gow3-benchmark-control.patch
           git diff --check
 
           $sourceChecks = @(
