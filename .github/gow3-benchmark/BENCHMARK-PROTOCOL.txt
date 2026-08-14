@@ -4,7 +4,7 @@ FIRST-TIME SETUP
 1. In your normal shadPS4 installation, make sure the existing CUSA01623 save is at the checkpoint you want to benchmark.
 2. Close shadPS4.
 3. Run CREATE-GOW3-BENCHMARK-SNAPSHOT.bat.
-4. Do not modify benchmark-save-snapshot during A/B testing.
+4. The snapshot is stored persistently under %APPDATA%\shadPS4\gow3-benchmark\snapshot and is reused by future artifacts.
 
 EACH BENCHMARK RUN
 1. Run START-GOW3-BENCHMARK.bat "C:\path\to\GodOfWar3\eboot.bin".
@@ -18,7 +18,7 @@ EACH BENCHMARK RUN
 The launcher temporarily replaces the live CUSA01623 save with a fresh copy of the immutable benchmark snapshot.
 When shadPS4 exits, it restores the user's original live save and original global/per-game configs.
 
-If PowerShell or Windows is forcibly terminated and backup directories remain, close shadPS4 and run:
+If PowerShell or Windows is forcibly terminated, pending transactional state remains under %APPDATA%\shadPS4\gow3-benchmark\pending-state. Close shadPS4 and run:
 RESTORE-GOW3-BENCHMARK-STATE.ps1
 
 CONTROLLED GPU CONFIG

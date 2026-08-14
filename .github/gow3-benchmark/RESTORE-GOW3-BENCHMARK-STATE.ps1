@@ -6,8 +6,10 @@ Assert-NoShadProcess
 $shadRoot = Join-Path $env:APPDATA 'shadPS4'
 $configPath = Join-Path $shadRoot 'config.json'
 $gameConfigPath = Join-Path (Join-Path $shadRoot 'custom_configs') 'CUSA01623.json'
-$configBackupRoot = Join-Path $PSScriptRoot 'config-backup'
-$saveBackupRoot = Join-Path $PSScriptRoot 'benchmark-save-live-backup'
+$benchmarkRoot = Join-Path $shadRoot 'gow3-benchmark'
+$stateRoot = Join-Path $benchmarkRoot 'pending-state'
+$configBackupRoot = Join-Path $stateRoot 'config-backup'
+$saveBackupRoot = Join-Path $stateRoot 'save-backup'
 
 if (Test-Path -LiteralPath $configBackupRoot) {
     $globalBackup = Join-Path $configBackupRoot 'config.json'
@@ -29,7 +31,6 @@ if (Test-Path -LiteralPath $configBackupRoot) {
     } elseif (Test-Path -LiteralPath $noGameMarker) {
         Remove-Item -LiteralPath $gameConfigPath -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath $configBackupRoot -Recurse -Force
 }
 
 if (Test-Path -LiteralPath $saveBackupRoot) {
@@ -44,7 +45,8 @@ if (Test-Path -LiteralPath $saveBackupRoot) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $savePath) | Out-Null
         Move-Item -LiteralPath $saveBackupData -Destination $savePath -Force
     }
-    Remove-Item -LiteralPath $saveBackupRoot -Recurse -Force
 }
+
+Remove-Item -LiteralPath $stateRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host 'Any pending benchmark configuration/save backup has been restored.'

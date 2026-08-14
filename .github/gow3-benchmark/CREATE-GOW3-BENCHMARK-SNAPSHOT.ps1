@@ -13,7 +13,8 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'user')) {
 
 $shadRoot = Join-Path $env:APPDATA 'shadPS4'
 $savePath = Get-Gow3SavePath $shadRoot
-$snapshotRoot = Join-Path $PSScriptRoot 'benchmark-save-snapshot'
+$benchmarkRoot = Join-Path $shadRoot 'gow3-benchmark'
+$snapshotRoot = Join-Path $benchmarkRoot 'snapshot'
 $snapshotData = Join-Path $snapshotRoot 'CUSA01623'
 $manifestPath = Join-Path $snapshotRoot 'SNAPSHOT-MANIFEST.json'
 
@@ -39,4 +40,4 @@ Write-Host ''
 Write-Host 'Benchmark save snapshot created.'
 Write-Host "Source:   $savePath"
 Write-Host "Snapshot: $snapshotData"
-Write-Host 'Do not modify benchmark-save-snapshot during A/B testing.'
+Write-Host 'This persistent snapshot is reused by future benchmark artifacts. Do not modify it during A/B testing.'

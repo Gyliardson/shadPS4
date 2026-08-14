@@ -24,9 +24,11 @@ $customDir = Join-Path $shadRoot 'custom_configs'
 $logDir = Join-Path $shadRoot 'log'
 $configPath = Join-Path $shadRoot 'config.json'
 $gameConfigPath = Join-Path $customDir 'CUSA01623.json'
-$configBackupRoot = Join-Path $PSScriptRoot 'config-backup'
-$saveBackupRoot = Join-Path $PSScriptRoot 'benchmark-save-live-backup'
-$snapshotRoot = Join-Path $PSScriptRoot 'benchmark-save-snapshot'
+$benchmarkRoot = Join-Path $shadRoot 'gow3-benchmark'
+$stateRoot = Join-Path $benchmarkRoot 'pending-state'
+$configBackupRoot = Join-Path $stateRoot 'config-backup'
+$saveBackupRoot = Join-Path $stateRoot 'save-backup'
+$snapshotRoot = Join-Path $benchmarkRoot 'snapshot'
 $snapshotData = Join-Path $snapshotRoot 'CUSA01623'
 $snapshotManifest = Join-Path $snapshotRoot 'SNAPSHOT-MANIFEST.json'
 $outputRoot = Join-Path $PSScriptRoot 'test-output\benchmark-readback'
@@ -34,18 +36,15 @@ $outputRoot = Join-Path $PSScriptRoot 'test-output\benchmark-readback'
 if (-not (Test-Path -LiteralPath $snapshotData)) {
     throw 'Benchmark save snapshot is missing. First close shadPS4 and run CREATE-GOW3-BENCHMARK-SNAPSHOT.bat while your desired checkpoint save is the current save.'
 }
-if (Test-Path -LiteralPath $configBackupRoot) {
-    throw 'config-backup already exists. Run RESTORE-GOW3-BENCHMARK-STATE.ps1 before another benchmark.'
-}
-if (Test-Path -LiteralPath $saveBackupRoot) {
-    throw 'benchmark-save-live-backup already exists. Run RESTORE-GOW3-BENCHMARK-STATE.ps1 before another benchmark.'
+if (Test-Path -LiteralPath $stateRoot) {
+    throw 'A pending benchmark state already exists. Run RESTORE-GOW3-BENCHMARK-STATE.ps1 before another benchmark.'
 }
 
 $savePath = Get-Gow3SavePath $shadRoot
 $saveParent = Split-Path -Parent $savePath
 $hadGlobalConfig = Test-Path -LiteralPath $configPath
 $hadGameConfig = Test-Path -LiteralPath $gameConfigPath
-New-Item -ItemType Directory -Force -Path $shadRoot, $customDir, $logDir, $configBackupRoot, $saveBackupRoot, $outputRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $shadRoot, $customDir, $logDir, $benchmarkRoot, $stateRoot, $configBackupRoot, $saveBackupRoot, $outputRoot | Out-Null
 if (-not $hadGlobalConfig) {
     New-Item -ItemType File -Force -Path (Join-Path $configBackupRoot 'NO-GLOBAL-CONFIG') | Out-Null
 }
@@ -142,8 +141,7 @@ finally {
         Move-Item -LiteralPath $saveBackupData -Destination $savePath -Force
     }
 
-    Remove-Item -LiteralPath $configBackupRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $saveBackupRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stateRoot -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Host ''
     Write-Host 'Original configuration and live save restored.'
