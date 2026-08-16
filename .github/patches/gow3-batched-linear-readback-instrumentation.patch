@@ -1,0 +1,44 @@
+diff --git a/src/video_core/texture_cache/texture_cache.cpp b/src/video_core/texture_cache/texture_cache.cpp
+--- a/src/video_core/texture_cache/texture_cache.cpp
++++ b/src/video_core/texture_cache/texture_cache.cpp
+@@ -53,6 +53,7 @@ TextureCache::~TextureCache() = default;
+ 
+ void TextureCache::ProcessDownloadImages() {
+     std::unique_lock lk{download_images_mutex};
++    const auto readback_start = std::chrono::steady_clock::now();
+ 
+     struct PendingDownload {
+         VAddr guest_address;
+@@ -61,6 +62,7 @@ void TextureCache::ProcessDownloadImages() {
+         u32 size;
+     };
+     boost::container::small_vector<PendingDownload, 16> pending_downloads;
++    u64 total_download_size = 0;
+ 
+     for (const ImageId image_id : download_images) {
+         Image& image = slot_images[image_id];
+@@ -95,15 +97,26 @@ void TextureCache::ProcessDownloadImages() {
+         cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                  download_buffer.Handle(), image_download);
+         pending_downloads.push_back({image.info.guest_address, download, download_size});
++        total_download_size += download_size;
+     }
+ 
+     if (!pending_downloads.empty()) {
++        const auto finish_start = std::chrono::steady_clock::now();
+         scheduler.Finish();
++        Common::PerfTrace::RecordImageReadbackFinish(std::chrono::steady_clock::now() -
++                                                     finish_start);
++        const auto copyback_start = std::chrono::steady_clock::now();
+         auto* memory = Core::Memory::Instance();
+         for (const auto& pending : pending_downloads) {
+             memory->TryWriteBacking(std::bit_cast<u8*>(pending.guest_address), pending.data,
+                                     pending.size);
+         }
++        Common::PerfTrace::RecordImageReadbackCopyback(std::chrono::steady_clock::now() -
++                                                       copyback_start);
++        Common::PerfTrace::RecordImageReadback(std::chrono::steady_clock::now() - readback_start,
++                                               total_download_size);
+     }
+     download_images.clear();
+ }
