@@ -1,0 +1,336 @@
+diff --git a/src/common/perf_trace.h b/src/common/perf_trace.h
+--- a/src/common/perf_trace.h
++++ b/src/common/perf_trace.h
+@@ -136,6 +136,12 @@ inline TraceState& GetState() {
+     return state;
+ }
+ 
++inline bool IsCaptureActive() {
++    auto& state = GetState();
++    std::scoped_lock lock{state.mutex};
++    return state.capture_active;
++}
++
+ inline bool ToggleCapture() {
+     auto& state = GetState();
+     std::scoped_lock lock{state.mutex};
+diff --git a/src/core/libraries/pad/pad.h b/src/core/libraries/pad/pad.h
+--- a/src/core/libraries/pad/pad.h
++++ b/src/core/libraries/pad/pad.h
+@@ -347,6 +347,10 @@ int PS4_SYSV_ABI Func_51E514BCD3A05CA5();
+ int PS4_SYSV_ABI Func_89C9237E393DA243();
+ int PS4_SYSV_ABI Func_EF103E845B6F0420();
+ 
++// Benchmark-only deterministic input capture/replay. Added by the GOW3 diagnostic build.
++bool PrepareGow3BenchmarkPadCapture();
++void SetGow3BenchmarkPadCaptureActive(bool active);
++
+ void RegisterLib(Core::Loader::SymbolsResolver* sym);
+ } // namespace Libraries::Pad
+diff --git a/src/core/libraries/pad/pad.cpp b/src/core/libraries/pad/pad.cpp
+--- a/src/core/libraries/pad/pad.cpp
++++ b/src/core/libraries/pad/pad.cpp
+@@ -2,12 +2,17 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
+ #include "common/elf_info.h"
+ #include "common/logging/log.h"
++#include "common/perf_trace.h"
+ #include "common/singleton.h"
+ #include "core/emulator_settings.h"
+ #include "core/libraries/libs.h"
++#include "core/libraries/kernel/time.h"
+ #include "core/libraries/pad/pad_errors.h"
+ #include "core/user_settings.h"
+ #include "imgui/renderer/imgui_core.h"
+@@ -16,8 +21,10 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cstring>
++#include <mutex>
+ #include <optional>
++#include <vector>
+ 
+ namespace Libraries::Pad {
+ 
+@@ -42,6 +49,177 @@ static u64 pad_handle_counter = 1;
+ static std::unordered_map<HandleKey, s32, HandleKeyHash> pad_handle_map{};
+ static std::unordered_map<s32, GameController*> handle_to_controller_map{};
+ 
++namespace {
++
++constexpr std::array<char, 8> Gow3PadReplayMagic{'G', 'O', 'W', '3', 'P', 'A', 'D', '1'};
++constexpr u32 Gow3PadReplayVersion = 1;
++
++enum class Gow3PadReplayMode {
++    Disabled,
++    Record,
++    Replay,
++};
++
++struct Gow3PadReplayCall {
++    s32 requested_num{};
++    s32 returned_num{};
++    std::array<OrbisPadData, ORBIS_PAD_MAX_DATA_NUM> data{};
++};
++
++struct Gow3PadReplayState {
++    std::mutex mutex;
++    Gow3PadReplayMode mode{Gow3PadReplayMode::Disabled};
++    std::filesystem::path path;
++    std::ofstream record_file;
++    std::vector<Gow3PadReplayCall> replay_calls;
++    size_t replay_cursor{};
++    bool capture_active{};
++    bool divergence_reported{};
++};
++
++Gow3PadReplayState& GetGow3PadReplayState() {
++    static Gow3PadReplayState state;
++    return state;
++}
++
++template <typename T>
++bool ReadReplayValue(std::ifstream& file, T& value) {
++    return static_cast<bool>(file.read(reinterpret_cast<char*>(&value), sizeof(value)));
++}
++
++template <typename T>
++void WriteReplayValue(std::ofstream& file, const T& value) {
++    file.write(reinterpret_cast<const char*>(&value), sizeof(value));
++}
++
++bool LoadGow3PadReplay(Gow3PadReplayState& state) {
++    std::ifstream file{state.path, std::ios::binary};
++    if (!file.is_open()) {
++        LOG_ERROR(Lib_Pad, "GOW3_PAD_REPLAY_V1 failed to open replay file: {}",
++                  state.path.string());
++        return false;
++    }
++
++    std::array<char, Gow3PadReplayMagic.size()> magic{};
++    file.read(magic.data(), magic.size());
++    u32 version{};
++    u32 pad_data_size{};
++    if (!file || magic != Gow3PadReplayMagic || !ReadReplayValue(file, version) ||
++        !ReadReplayValue(file, pad_data_size) || version != Gow3PadReplayVersion ||
++        pad_data_size != sizeof(OrbisPadData)) {
++        LOG_ERROR(Lib_Pad,
++                  "GOW3_PAD_REPLAY_V1 invalid replay header (version={}, pad_data_size={}, expected={})",
++                  version, pad_data_size, sizeof(OrbisPadData));
++        return false;
++    }
++
++    state.replay_calls.clear();
++    while (true) {
++        Gow3PadReplayCall call{};
++        if (!ReadReplayValue(file, call.requested_num)) {
++            if (file.eof()) {
++                break;
++            }
++            return false;
++        }
++        if (!ReadReplayValue(file, call.returned_num) || call.requested_num < 1 ||
++            call.requested_num > ORBIS_PAD_MAX_DATA_NUM || call.returned_num < 0 ||
++            call.returned_num > call.requested_num) {
++            LOG_ERROR(Lib_Pad, "GOW3_PAD_REPLAY_V1 invalid call record");
++            return false;
++        }
++        const size_t bytes = static_cast<size_t>(call.returned_num) * sizeof(OrbisPadData);
++        if (bytes != 0 && !file.read(reinterpret_cast<char*>(call.data.data()), bytes)) {
++            LOG_ERROR(Lib_Pad, "GOW3_PAD_REPLAY_V1 truncated replay payload");
++            return false;
++        }
++        state.replay_calls.push_back(std::move(call));
++    }
++
++    if (state.replay_calls.empty()) {
++        LOG_ERROR(Lib_Pad, "GOW3_PAD_REPLAY_V1 replay file contains no pad reads");
++        return false;
++    }
++    state.replay_cursor = 0;
++    state.divergence_reported = false;
++    LOG_INFO(Lib_Pad, "GOW3_PAD_REPLAY_V1 loaded {} pad-read calls from {}",
++             state.replay_calls.size(), state.path.string());
++    return true;
++}
++
++void ResetGow3PadReplayLocked(Gow3PadReplayState& state) {
++    if (state.record_file.is_open()) {
++        state.record_file.flush();
++        state.record_file.close();
++    }
++    state.mode = Gow3PadReplayMode::Disabled;
++    state.path.clear();
++    state.replay_calls.clear();
++    state.replay_cursor = 0;
++    state.capture_active = false;
++    state.divergence_reported = false;
++}
++
++} // namespace
++
++bool PrepareGow3BenchmarkPadCapture() {
++    auto& state = GetGow3PadReplayState();
++    std::scoped_lock lock{state.mutex};
++    ResetGow3PadReplayLocked(state);
++
++    const char* record_path = std::getenv("SHADPS4_GOW3_PAD_RECORD");
++    const char* replay_path = std::getenv("SHADPS4_GOW3_PAD_REPLAY");
++    const bool record_enabled = record_path != nullptr && record_path[0] != '\0';
++    const bool replay_enabled = replay_path != nullptr && replay_path[0] != '\0';
++    if (record_enabled && replay_enabled) {
++        LOG_ERROR(Lib_Pad, "GOW3_PAD_REPLAY_V1 record and replay are both configured");
++        return false;
++    }
++    if (!record_enabled && !replay_enabled) {
++        return true;
++    }
++
++    if (record_enabled) {
++        state.mode = Gow3PadReplayMode::Record;
++        state.path = std::filesystem::path{record_path};
++        std::error_code ec;
++        std::filesystem::create_directories(state.path.parent_path(), ec);
++        state.record_file.open(state.path, std::ios::binary | std::ios::trunc);
++        if (!state.record_file.is_open()) {
++            LOG_ERROR(Lib_Pad, "GOW3_PAD_REPLAY_V1 failed to create record file: {}",
++                      state.path.string());
++            ResetGow3PadReplayLocked(state);
++            return false;
++        }
++        state.record_file.write(Gow3PadReplayMagic.data(), Gow3PadReplayMagic.size());
++        WriteReplayValue(state.record_file, Gow3PadReplayVersion);
++        const u32 pad_data_size = sizeof(OrbisPadData);
++        WriteReplayValue(state.record_file, pad_data_size);
++        LOG_INFO(Lib_Pad, "GOW3_PAD_REPLAY_V1 recording to {}", state.path.string());
++        return static_cast<bool>(state.record_file);
++    }
++
++    state.mode = Gow3PadReplayMode::Replay;
++    state.path = std::filesystem::path{replay_path};
++    if (!LoadGow3PadReplay(state)) {
++        ResetGow3PadReplayLocked(state);
++        return false;
++    }
++    return true;
++}
++
++void SetGow3BenchmarkPadCaptureActive(bool active) {
++    auto& state = GetGow3PadReplayState();
++    std::scoped_lock lock{state.mutex};
++    state.capture_active = active;
++    if (!active && state.record_file.is_open()) {
++        state.record_file.flush();
++        state.record_file.close();
++        LOG_INFO(Lib_Pad, "GOW3_PAD_REPLAY_V1 recording finalized: {}", state.path.string());
++    }
++    if (!active && state.mode == Gow3PadReplayMode::Replay) {
++        LOG_INFO(Lib_Pad, "GOW3_PAD_REPLAY_V1 replay stopped at {}/{} pad-read calls",
++                 state.replay_cursor, state.replay_calls.size());
++    }
++}
++
+ int PS4_SYSV_ABI scePadClose(s32 handle) {
+     LOG_WARNING(Lib_Pad, "called, handle: {}", handle);
+     if (handle_to_controller_map.erase(handle) == 0) {
+@@ -418,6 +596,43 @@ int PS4_SYSV_ABI scePadRead(s32 handle, OrbisPadData* pData, s32 num) {
+     if (it == handle_to_controller_map.end()) {
+         return ORBIS_PAD_ERROR_INVALID_HANDLE;
+     }
++
++    {
++        auto& replay = GetGow3PadReplayState();
++        bool auto_stop = false;
++        {
++            std::scoped_lock lock{replay.mutex};
++            if (replay.capture_active && replay.mode == Gow3PadReplayMode::Replay) {
++                if (replay.replay_cursor >= replay.replay_calls.size()) {
++                    if (!replay.divergence_reported) {
++                        LOG_ERROR(Lib_Pad, "GOW3_PAD_REPLAY_V1 replay exhausted unexpectedly");
++                        replay.divergence_reported = true;
++                    }
++                    return 0;
++                }
++                const auto& call = replay.replay_calls[replay.replay_cursor++];
++                if (call.requested_num != num || call.returned_num > num) {
++                    if (!replay.divergence_reported) {
++                        LOG_ERROR(Lib_Pad,
++                                  "GOW3_PAD_REPLAY_V1 DIVERGENCE at call {}: requested {} now, recorded {} with {} returned",
++                                  replay.replay_cursor - 1, num, call.requested_num,
++                                  call.returned_num);
++                        replay.divergence_reported = true;
++                    }
++                    return 0;
++                }
++                const u64 now = Libraries::Kernel::sceKernelGetProcessTime();
++                for (s32 i = 0; i < call.returned_num; ++i) {
++                    pData[i] = call.data[i];
++                    pData[i].timestamp = now;
++                }
++                auto_stop = replay.replay_cursor == replay.replay_calls.size();
++                if (auto_stop) {
++                    replay.capture_active = false;
++                    LOG_INFO(Lib_Pad, "GOW3_PAD_REPLAY_V1 COMPLETE: {} pad-read calls replayed",
++                             replay.replay_cursor);
++                }
++                if (!auto_stop) {
++                    return call.returned_num;
++                }
++            }
++        }
++        if (auto_stop) {
++            const bool still_active = Common::PerfTrace::IsCaptureActive();
++            if (still_active) {
++                Common::PerfTrace::ToggleCapture();
++                LOG_INFO(Lib_Pad, "GOW3_PAD_REPLAY_V1 benchmark trace AUTO-STOPPED");
++            }
++            return 1;
++        }
++    }
++
+     auto& controller = *it->second;
+     std::array<Input::State, ORBIS_PAD_MAX_DATA_NUM> states;
+     const int ret_num = controller.ReadStates(states.data(), num);
+-    return ProcessStates(pData, states.data(), ret_num);
++    const int processed = ProcessStates(pData, states.data(), ret_num);
++
++    auto& replay = GetGow3PadReplayState();
++    std::scoped_lock replay_lock{replay.mutex};
++    if (replay.capture_active && replay.mode == Gow3PadReplayMode::Record &&
++        replay.record_file.is_open()) {
++        WriteReplayValue(replay.record_file, num);
++        WriteReplayValue(replay.record_file, processed);
++        if (processed > 0) {
++            replay.record_file.write(reinterpret_cast<const char*>(pData),
++                                     static_cast<size_t>(processed) * sizeof(OrbisPadData));
++        }
++    }
++    return processed;
+ }
+ 
+ int PS4_SYSV_ABI scePadReadBlasterForTracker() {
+diff --git a/src/sdl_window.cpp b/src/sdl_window.cpp
+--- a/src/sdl_window.cpp
++++ b/src/sdl_window.cpp
+@@ -205,7 +205,17 @@ void WindowSDL::WaitEvent() {
+     (void)benchmark_ready_printed;
+ 
+     const auto toggle_benchmark_capture = [](const char* trigger) {
++        const bool starting = !Common::PerfTrace::IsCaptureActive();
++        if (starting && !Libraries::Pad::PrepareGow3BenchmarkPadCapture()) {
++            std::fprintf(stderr,
++                         "\n=== GOW3 BENCHMARK CAPTURE REFUSED: PAD RECORD/REPLAY PREP FAILED ===\n\n");
++            std::fflush(stderr);
++            LOG_ERROR(Frontend, "GOW3 benchmark pad record/replay preparation failed");
++            return;
++        }
+         const bool active = Common::PerfTrace::ToggleCapture();
++        Libraries::Pad::SetGow3BenchmarkPadCaptureActive(active);
+         std::fprintf(stderr, "\n=== GOW3 BENCHMARK CAPTURE %s (%s) ===\n\n",
+                      active ? "STARTED" : "STOPPED", trigger);
+         std::fflush(stderr);
