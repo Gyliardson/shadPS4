@@ -1,0 +1,69 @@
+diff --git a/src/video_core/texture_cache/texture_cache.cpp b/src/video_core/texture_cache/texture_cache.cpp
+--- a/src/video_core/texture_cache/texture_cache.cpp
++++ b/src/video_core/texture_cache/texture_cache.cpp
+@@ -35,6 +35,7 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
+       buffer_cache{buffer_cache_}, tracker{tracker_}, blit_helper{instance, scheduler},
+       tile_manager{instance, scheduler, buffer_cache.GetUtilityBuffer(MemoryUsage::Stream)},
+       readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
++    LOG_INFO(Render_Vulkan, "GOW3_BATCHED_LINEAR_READBACK_V1 enabled");
+ 
+     u32 max_samplers = instance.GetMaxSamplerAllocationCount();
+     trigger_gc_samplers = max_samplers * 3 / 4;
+@@ -51,9 +52,51 @@ TextureCache::~TextureCache() = default;
+ 
+ void TextureCache::ProcessDownloadImages() {
+     std::unique_lock lk{download_images_mutex};
++
++    struct PendingDownload {
++        VAddr guest_address;
++        u8* data;
++        u32 size;
++    };
++    boost::container::small_vector<PendingDownload, 16> pending_downloads;
++
+     for (const ImageId image_id : download_images) {
+-        DownloadImageMemory(image_id, true);
++        Image& image = slot_images[image_id];
++        if (False(image.flags & ImageFlagBits::GpuModified)) {
++            continue;
++        }
++
++        auto& download_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
++        const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
++                                  image.info.resources.layers * (image.info.num_bits / 8);
++        ASSERT(download_size <= image.info.guest_size);
++        const auto [download, offset] = download_buffer.Map(download_size);
++        download_buffer.Commit();
++        const vk::BufferImageCopy image_download = {
++            .bufferOffset = offset,
++            .bufferRowLength = image.info.pitch,
++            .bufferImageHeight = image.info.size.height,
++            .imageSubresource =
++                {
++                    .aspectMask = image.info.props.is_depth ? vk::ImageAspectFlagBits::eDepth
++                                                            : vk::ImageAspectFlagBits::eColor,
++                    .mipLevel = 0,
++                    .baseArrayLayer = 0,
++                    .layerCount = image.info.resources.layers,
++                },
++            .imageOffset = {0, 0, 0},
++            .imageExtent = {image.info.size.width, image.info.size.height, image.info.size.depth},
++        };
++        scheduler.EndRendering();
++        const auto cmdbuf = scheduler.CommandBuffer();
++        image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
++        cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
++                                 download_buffer.Handle(), image_download);
++        pending_downloads.push_back({image.info.guest_address, download, download_size});
++    }
++
++    if (!pending_downloads.empty()) {
++        scheduler.Finish();
++        auto* memory = Core::Memory::Instance();
++        for (const auto& pending : pending_downloads) {
++            memory->TryWriteBacking(std::bit_cast<u8*>(pending.guest_address), pending.data,
++                                    pending.size);
++        }
+     }
+     download_images.clear();
+ }
