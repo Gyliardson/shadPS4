@@ -8,10 +8,13 @@ on:
   push:
     branches:
       - gow3-intel-b580-predication
+      - gow3-intel-b580-pcache
     paths:
       - .github/workflows/gow3-benchmark-readback.yml
       - .github/patches/gow3-benchmark-readback.patch
       - .github/patches/gow3-benchmark-control.patch
+      - .github/patches/gow3-batched-linear-readback.patch
+      - .github/patches/gow3-batched-linear-readback-instrumentation.patch
       - .github/gow3-benchmark/**
 
 concurrency:
@@ -33,19 +36,26 @@ jobs:
       - name: Apply and validate benchmark-only instrumentation
         shell: pwsh
         run: |
-          # These diagnostic patches were assembled from isolated hunks. --recount makes
-          # git derive the hunk lengths from the patch body instead of trusting stale
-          # line-count metadata, while --check still rejects context/content mismatches.
+          # Behavior experiment first: preserve synchronous correctness while batching all
+          # pending linear-image copies behind one scheduler.Finish().
+          git apply --recount --check .github/patches/gow3-batched-linear-readback.patch
+          git apply --recount .github/patches/gow3-batched-linear-readback.patch
+
+          # Diagnostic instrumentation is layered on top of the behavior patch.
           git apply --recount --check .github/patches/gow3-benchmark-readback.patch
           git apply --recount .github/patches/gow3-benchmark-readback.patch
           git apply --recount --check .github/patches/gow3-benchmark-control.patch
           git apply --recount .github/patches/gow3-benchmark-control.patch
+          git apply --recount --check .github/patches/gow3-batched-linear-readback-instrumentation.patch
+          git apply --recount .github/patches/gow3-batched-linear-readback-instrumentation.patch
           git diff --check
 
           $sourceChecks = @(
             @{ Path = 'src/common/perf_trace.h'; Marker = 'image_readback_finish_total_ms' },
             @{ Path = 'src/sdl_window.cpp'; Marker = 'GOW3_BENCHMARK_INSTRUMENTATION_V2' },
-            @{ Path = 'src/sdl_window.cpp'; Marker = 'SDL_GAMEPAD_BUTTON_GUIDE' }
+            @{ Path = 'src/sdl_window.cpp'; Marker = 'SDL_GAMEPAD_BUTTON_GUIDE' },
+            @{ Path = 'src/video_core/texture_cache/texture_cache.cpp'; Marker = 'GOW3_BATCHED_LINEAR_READBACK_V1' },
+            @{ Path = 'src/video_core/texture_cache/texture_cache.cpp'; Marker = 'total_download_size' }
           )
           foreach ($check in $sourceChecks) {
             $text = Get-Content -LiteralPath $check.Path -Raw
@@ -55,9 +65,8 @@ jobs:
           }
           Write-Host 'Benchmark source instrumentation validated.'
 
-      # Deliberately no compiler cache in this diagnostic workflow. A previous green run
-      # produced an executable without the applied benchmark instrumentation, so binary
-      # identity takes priority over compile time here.
+      # Deliberately no compiler cache in this diagnostic workflow. Binary identity takes
+      # priority over compile time for the benchmark artifact.
       - name: Configure CMake
         run: >-
           cmake --fresh -G Ninja
@@ -82,7 +91,8 @@ jobs:
           $markers = @(
             'GOW3_BENCHMARK_INSTRUMENTATION_V2',
             'GOW3 BENCHMARK CAPTURE',
-            'image_readback_finish_total_ms'
+            'image_readback_finish_total_ms',
+            'GOW3_BATCHED_LINEAR_READBACK_V1'
           )
           foreach ($marker in $markers) {
             if (-not $ascii.Contains($marker)) {
@@ -103,7 +113,7 @@ jobs:
 
           $bytes = [System.IO.File]::ReadAllBytes($artifactExe)
           $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
-          foreach ($marker in @('GOW3_BENCHMARK_INSTRUMENTATION_V2', 'GOW3 BENCHMARK CAPTURE', 'image_readback_finish_total_ms')) {
+          foreach ($marker in @('GOW3_BENCHMARK_INSTRUMENTATION_V2', 'GOW3 BENCHMARK CAPTURE', 'image_readback_finish_total_ms', 'GOW3_BATCHED_LINEAR_READBACK_V1')) {
             if (-not $ascii.Contains($marker)) {
               throw "INVALID PACKAGED BENCHMARK EXECUTABLE: marker missing after copy: $marker"
             }
@@ -112,14 +122,19 @@ jobs:
           $exeHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifactExe).Hash.ToLowerInvariant()
           $readbackPatchHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "${{ github.workspace }}/.github/patches/gow3-benchmark-readback.patch").Hash.ToLowerInvariant()
           $controlPatchHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "${{ github.workspace }}/.github/patches/gow3-benchmark-control.patch").Hash.ToLowerInvariant()
+          $batchPatchHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "${{ github.workspace }}/.github/patches/gow3-batched-linear-readback.patch").Hash.ToLowerInvariant()
+          $batchInstrumentationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath "${{ github.workspace }}/.github/patches/gow3-batched-linear-readback-instrumentation.patch").Hash.ToLowerInvariant()
 
           @"
           GOW3 Intel B580 benchmark artifact
           Branch: ${{ github.ref_name }}
           Commit: ${{ github.sha }}
           Instrumentation: GOW3_BENCHMARK_INSTRUMENTATION_V2
+          Behavior experiment: GOW3_BATCHED_LINEAR_READBACK_V1
           Readback patch SHA256: $readbackPatchHash
           Control patch SHA256: $controlPatchHash
+          Batched readback patch SHA256: $batchPatchHash
+          Batched instrumentation patch SHA256: $batchInstrumentationHash
           Executable SHA256: $exeHash
           Binary marker validation: PASS
           Compiler cache: DISABLED
